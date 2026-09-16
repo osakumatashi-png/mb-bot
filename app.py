@@ -6,6 +6,7 @@ import threading
 import asyncio
 import base64
 import re
+from datetime import datetime, timezone
 
 import requests
 from bs4 import BeautifulSoup
@@ -21,7 +22,6 @@ API_URL = "https://zcodesystem.com/livebettingbot/get_sport_data.php"
 SEEN_FILE = "seen.json"
 CHECK_EVERY = 60
 
-# AsianBetSports
 TG_API_ID = int(os.environ.get("API_ID", "0"))
 TG_API_HASH = os.environ.get("API_HASH", "")
 TG_SESSION_B64 = os.environ.get("SESSION_BASE64", "")
@@ -32,7 +32,7 @@ TG_SESSION_FILE = "mb_session.session"
 app = Flask(__name__)
 
 
-# ========== TELEGRAM (ZC) ==========
+# ========== ZCODESYSTEM ==========
 
 def get_data():
     payload = {"sport": "SOCCER", "lang": "en", "type": 0}
@@ -84,10 +84,9 @@ def parse_table(html, table_class):
     return results
 
 
-# ========== ASIANBETSPORTS (TELEGRAM) ==========
+# ========== ASIANBETSPORTS ==========
 
 def decode_session():
-    """Декодирует base64 сессию в файл."""
     if not TG_SESSION_B64:
         print("[TG] SESSION_BASE64 не задан", flush=True)
         return False
@@ -103,12 +102,11 @@ def decode_session():
 
 
 def parse_abs_message(text):
-    """Парсит сообщение из AsianBetSports."""
     if not text:
         return None
 
     result = {
-        "status": None,       # CONFIRMED / ANNOUNCE / WIN / LOSS / WARNING
+        "status": None,
         "league": "",
         "match": "",
         "score": "",
@@ -116,7 +114,6 @@ def parse_abs_message(text):
         "strength": "",
     }
 
-    # Статус
     if "🔴" in text:
         result["status"] = "CONFIRMED"
     elif "🔵" in text:
@@ -131,7 +128,6 @@ def parse_abs_message(text):
     if not result["status"]:
         return None
 
-    # Сила
     for emoji, name in [("🔥", "strong"), ("💰", "confirmed"),
                          ("⭐", "preliminary"), ("💣", "medium"),
                          ("🚀", "super")]:
@@ -139,17 +135,14 @@ def parse_abs_message(text):
             result["strength"] = name
             break
 
-    # Лига (строка после 🏆)
     league_match = re.search(r"🏆\s*(.+)", text)
     if league_match:
         result["league"] = league_match.group(1).strip()
 
-    # Матч (строка с ⚽ или со счётом)
     match_match = re.search(r"⚽\s*(.+)", text)
     if match_match:
         result["match"] = match_match.group(1).strip()
 
-    # Счёт (X-X)
     score_match = re.search(r"(\d+-\d+)", text)
     if score_match:
         result["score"] = score_match.group(1)
@@ -158,12 +151,11 @@ def parse_abs_message(text):
 
 
 def make_abs_key(data):
-    """Ключ для дедупликации AsianBetSports."""
     raw = f"ABS|{data['match']}|{data['league']}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
-# ========== ОБЩИЕ ФУНКЦИИ ==========
+# ========== ОБЩИЕ ==========
 
 def make_key(bet):
     raw = f"{bet['league']}|{bet['match']}|{bet['date']}"
@@ -261,7 +253,7 @@ def send_to_telegram(image_path, caption, channel):
     return r.status_code, r.text[:200]
 
 
-# ========== ЦИКЛ ZCODESYSTEM ==========
+# ========== ZCODESYSTEM ЦИКЛ ==========
 
 def check_zc_once(seen, first_run):
     data = get_data()
@@ -324,10 +316,9 @@ def check_zc_once(seen, first_run):
     print(f"[ZC] === Итог: открытых {published_open} | серых {published_grey} | отсеяно result:{filtered['result']} дубликатов:{filtered['duplicate']} ===", flush=True)
 
 
-# ========== ЦИКЛ ASIANBETSPORTS ==========
+# ========== ASIANBETSPORTS ЦИКЛ ==========
 
 def check_abs_once(seen, first_run, abs_last_id):
-    """Читает новые сообщения из канала AsianBetSports."""
     published = 0
 
     async def read():
@@ -335,10 +326,10 @@ def check_abs_once(seen, first_run, abs_last_id):
         async with TelegramClient(TG_SESSION_FILE, TG_API_ID, TG_API_HASH) as client:
             print("[ABS] Подключение...", flush=True)
             messages = []
-            async for message in client.iter_messages(TG_CHANNEL_ID, limit=10):
+            async for message in client.iter_messages(TG_CHANNEL_ID, limit=15):
                 messages.append(message)
 
-            messages.reverse()  # от старых к новым
+            messages.reverse()
 
             for message in messages:
                 if message.id <= abs_last_id:
@@ -355,9 +346,18 @@ def check_abs_once(seen, first_run, abs_last_id):
                     continue
                 seen.add(key)
 
+                # Логика для первого запуска: свежие публикуем, старые запоминаем
                 if first_run:
-                    print(f"  [ABS-калибровка] {data['status']} | {data['match']}", flush=True)
-                    continue
+                    try:
+                        age_min = (datetime.now(timezone.utc) - message.date).total_seconds() / 60
+                    except Exception:
+                        age_min = 999
+
+                    if age_min < 10:
+                        print(f"  [ABS-свежее при первом запуске] {data['status']} | {data['match']}", flush=True)
+                    else:
+                        print(f"  [ABS-калибровка] {data['status']} | {data['match']}", flush=True)
+                        continue
 
                 try:
                     if data["status"] == "CONFIRMED":
@@ -392,7 +392,6 @@ def check_abs_once(seen, first_run, abs_last_id):
 def worker():
     print("=== Бот запущен ===", flush=True)
 
-    # Декодируем сессию Telegram
     decode_session()
 
     seen = load_seen()
@@ -404,10 +403,8 @@ def worker():
 
     while True:
         try:
-            # 1. ZCODESYSTEM
             check_zc_once(seen, first_run)
 
-            # 2. ASIANBETSPORTS
             if TG_API_ID and TG_API_HASH and TG_SESSION_B64:
                 check_abs_once(seen, first_run, abs_last_id)
             else:
