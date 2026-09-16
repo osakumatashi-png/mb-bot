@@ -114,20 +114,32 @@ def parse_abs_message(text):
         "strength": "",
     }
 
-    if "🔴" in text:
-        result["status"] = "CONFIRMED"
-    elif "🔵" in text:
-        result["status"] = "ANNOUNCE"
-    elif "✅" in text:
+    # Сначала извлекаем счёт — он нужен для различения WIN от CONFIRMED
+    score_match = re.search(r"(\d+-\d+)", text)
+    if score_match:
+        result["score"] = score_match.group(1)
+
+    # Логика статуса:
+    # 1. Если есть ✅ и счёт не 0-0 → это WIN (результат)
+    # 2. Если есть ❌ → LOSS
+    # 3. Если есть 🔴 → CONFIRMED (сигнал)
+    # 4. Если есть 🔵 → ANNOUNCE
+    # 5. Если есть ⚠️ → WARNING
+    if "✅" in text and result["score"] and result["score"] != "0-0":
         result["status"] = "WIN"
     elif "❌" in text:
         result["status"] = "LOSS"
+    elif "🔴" in text:
+        result["status"] = "CONFIRMED"
+    elif "🔵" in text:
+        result["status"] = "ANNOUNCE"
     elif "⚠️" in text:
         result["status"] = "WARNING"
 
     if not result["status"]:
         return None
 
+    # Сила сигнала (доп. эмодзи)
     for emoji, name in [("🔥", "strong"), ("💰", "confirmed"),
                          ("⭐", "preliminary"), ("💣", "medium"),
                          ("🚀", "super")]:
@@ -135,23 +147,22 @@ def parse_abs_message(text):
             result["strength"] = name
             break
 
+    # Лига
     league_match = re.search(r"🏆\s*(.+)", text)
     if league_match:
         result["league"] = league_match.group(1).strip()
 
+    # Матч
     match_match = re.search(r"⚽\s*(.+)", text)
     if match_match:
         result["match"] = match_match.group(1).strip()
-
-    score_match = re.search(r"(\d+-\d+)", text)
-    if score_match:
-        result["score"] = score_match.group(1)
 
     return result
 
 
 def make_abs_key(data):
-    raw = f"ABS|{data['match']}|{data['league']}"
+    # Ключ учитывает статус и счёт — CONFIRMED / WIN / LOSS будут разными ключами
+    raw = f"ABS|{data['match']}|{data['league']}|{data['status']}|{data['score']}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
@@ -326,7 +337,7 @@ def check_abs_once(seen, first_run, abs_last_id):
         async with TelegramClient(TG_SESSION_FILE, TG_API_ID, TG_API_HASH) as client:
             print("[ABS] Подключение...", flush=True)
             messages = []
-            async for message in client.iter_messages(TG_CHANNEL_ID, limit=15):
+            async for message in client.iter_messages(TG_CHANNEL_ID, limit=30):
                 messages.append(message)
 
             messages.reverse()
@@ -346,7 +357,7 @@ def check_abs_once(seen, first_run, abs_last_id):
                     continue
                 seen.add(key)
 
-                # Логика для первого запуска: свежие публикуем, старые запоминаем
+                # Калибровка: старые сообщения запоминаем, свежие публикуем
                 if first_run:
                     try:
                         age_min = (datetime.now(timezone.utc) - message.date).total_seconds() / 60
@@ -354,9 +365,9 @@ def check_abs_once(seen, first_run, abs_last_id):
                         age_min = 999
 
                     if age_min < 10:
-                        print(f"  [ABS-свежее при первом запуске] {data['status']} | {data['match']}", flush=True)
+                        print(f"  [ABS-свежее] {data['status']} | {data['match']} | {data['score']}", flush=True)
                     else:
-                        print(f"  [ABS-калибровка] {data['status']} | {data['match']}", flush=True)
+                        print(f"  [ABS-калибровка] {data['status']} | {data['match']} | {data['score']}", flush=True)
                         continue
 
                 try:
@@ -365,7 +376,7 @@ def check_abs_once(seen, first_run, abs_last_id):
                         caption = f"{data['league']}\n{data['match']}\n{data['signal']}"
                         code1, _ = send_to_telegram(img, caption, CHANNEL_OPEN)
                         code2, _ = send_to_telegram(img, caption, CHANNEL_GREY)
-                        print(f"  ✅ [ABS-CONFIRMED] {data['match']} | TG: {code1}/{code2}", flush=True)
+                        print(f"  ✅ [ABS-CONFIRMED] {data['match']} | {data['score']} | TG: {code1}/{code2}", flush=True)
                         published += 1
                     elif data["status"] == "ANNOUNCE":
                         img = make_card(data, mode="grey")
@@ -373,6 +384,10 @@ def check_abs_once(seen, first_run, abs_last_id):
                         code, _ = send_to_telegram(img, caption, CHANNEL_GREY)
                         print(f"  ✅ [ABS-ANNOUNCE] {data['match']} | TG: {code}", flush=True)
                         published += 1
+                    elif data["status"] == "WIN":
+                        print(f"  [ABS-WIN] {data['match']} | {data['score']} — без публикации", flush=True)
+                    elif data["status"] == "LOSS":
+                        print(f"  [ABS-LOSS] {data['match']} — без публикации", flush=True)
                     time.sleep(2)
                 except Exception as e:
                     print(f"    [ABS] Ошибка: {e}", flush=True)
