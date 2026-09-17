@@ -15,8 +15,8 @@ from telethon import TelegramClient
 
 # ====== НАСТРОЙКИ ======
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8392847779:AAGCkdGjL7iq2Zy5ZqPKPUJn8W0Qm0TF8Ks")
-CHANNEL_OPEN = "@MBmybetting"
-CHANNEL_GREY = "@MBmybetting2"
+CHANNEL_OPEN = -1003982891138
+CHANNEL_GREY = -1003720979095
 SEEN_FILE = "seen.json"
 CHECK_EVERY = 60
 
