@@ -9,14 +9,16 @@ import re
 from datetime import datetime, timezone
 
 import requests
+from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask
 from telethon import TelegramClient
 
 # ====== НАСТРОЙКИ ======
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8392847779:AAGCkdGjL7iq2Zy5ZqPKPUJn8W0Qm0TF8Ks")
-CHANNEL_OPEN = -1003982891138
-CHANNEL_GREY = -1003720979095
+CHANNEL_OPEN = -1003982891138       # @MBmybetting
+CHANNEL_GREY = -1003720979095       # @MBmybetting2
+API_URL = "https://zcodesystem.com/livebettingbot/get_sport_data.php"
 SEEN_FILE = "seen.json"
 CHECK_EVERY = 60
 
@@ -28,11 +30,135 @@ TG_SESSION_FILE = "mb_session.session"
 TG_CHANNEL_ID_ABS = -1001978715517      # AsianBetSports
 TG_CHANNEL_ID_ZLIVE = -1001284357331    # ZLive
 
+MB_COLOR_ZC = (180, 255, 100)           # салатовый для zcodesystem
 MB_COLOR_ABS = (100, 180, 255)          # голубой для AsianBetSports
 MB_COLOR_ZLIVE = (255, 200, 0)          # жёлтый для ZLive
 # =======================
 
 app = Flask(__name__)
+
+
+# ========== ZCODESYSTEM ==========
+
+def get_data():
+    payload = {"sport": "SOCCER", "lang": "en", "type": 0}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10)",
+        "X-Requested-With": "XMLHttpRequest"
+    }
+    r = requests.post(API_URL, data=payload, headers=headers, timeout=30)
+    return r.json()
+
+
+def parse_table(html, table_class):
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", class_=table_class)
+    if not table:
+        return []
+    tbody = table.find("tbody")
+    if not tbody:
+        return []
+    results = []
+    for row in tbody.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 7:
+            continue
+        try:
+            date_parts = cells[0].find_all("p")
+            date = " ".join(p.get_text(strip=True) for p in date_parts)
+            strong = cells[1].find("strong")
+            league = strong.get_text(strip=True) if strong else ""
+            if strong:
+                strong.extract()
+            match = cells[1].get_text(separator=" ", strip=True)
+            score_raw = cells[3].get_text(strip=True) if len(cells) > 3 else ""
+            score_short = score_raw.split("(")[0].strip() if "(" in score_raw else score_raw.strip()
+            signal = cells[4].get_text(strip=True)
+            odd = cells[6].get_text(strip=True)
+            result_cell = row.find("td", class_="result")
+            result_text = result_cell.get_text(strip=True) if result_cell else ""
+            results.append({
+                "league": league, "match": match, "date": date,
+                "score": score_short, "signal": signal, "odd": odd,
+                "result": result_text,
+            })
+        except Exception as e:
+            print(f"  [ZC parse error] {e}", flush=True)
+            continue
+    return results
+
+
+def make_zc_key(bet):
+    raw = f"ZC|{bet['league']}|{bet['match']}|{bet['date']}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def check_zc_once(seen, first_run):
+    try:
+        data = get_data()
+    except Exception as e:
+        print(f"[ZC] Ошибка запроса: {e}", flush=True)
+        return
+
+    inner = data.get("data", {})
+    all_bets = (
+        parse_table(inner.get("poss_bets", ""), "poss_bets") +
+        parse_table(inner.get("live_bets", ""), "livebets") +
+        parse_table(inner.get("last_bets", ""), "lastbets")
+    )
+
+    total = len(all_bets)
+    published_open = 0
+    published_grey = 0
+    filtered = {"result": 0, "duplicate": 0, "noscore": 0, "first_run": 0}
+
+    print(f"[ZC] === Найдено прогнозов: {total} ===", flush=True)
+
+    for bet in all_bets:
+        if bet["result"]:
+            r = bet["result"].strip().lower()
+            if r.startswith(("win", "loss", "void", "push", "half win", "half loss")):
+                filtered["result"] += 1
+                continue
+
+        key = make_zc_key(bet)
+        if key in seen:
+            filtered["duplicate"] += 1
+            continue
+        seen.add(key)
+
+        signal_low = bet["signal"].lower()
+        odd_low = bet["odd"].lower()
+        is_grey = ("unlock" in signal_low) or ("unlock" in odd_low)
+
+        if first_run:
+            filtered["first_run"] += 1
+            continue
+
+        try:
+            if is_grey:
+                if not bet.get("score") or "unlock" in bet["score"].lower():
+                    filtered["noscore"] += 1
+                    continue
+                img = make_card(bet, mode="grey", mb_color=MB_COLOR_ZC)
+                caption = f"{bet['league']}\n{bet['match']}\nСчёт: {bet['score']}\nБУДЕТ ГОЛ"
+                code, resp = send_to_telegram(img, caption, CHANNEL_GREY)
+                print(f"  ✅ [ZC-GREY] {bet['match']} | {bet['score']} | TG: {code}", flush=True)
+                published_grey += 1
+            else:
+                img = make_card(bet, mode="open", mb_color=MB_COLOR_ZC)
+                caption = f"{bet['league']}\n{bet['match']}\n{bet['signal']} @ {bet['odd']}"
+                code, resp = send_to_telegram(img, caption, CHANNEL_OPEN)
+                print(f"  ✅ [ZC-OPEN] {bet['match']} | {bet['signal']} | TG: {code}", flush=True)
+                published_open += 1
+            time.sleep(1)
+        except Exception as e:
+            print(f"    [ZC] Ошибка публикации: {e}", flush=True)
+
+    save_seen(seen)
+    print(f"[ZC] === Итог: открытых {published_open} | серых {published_grey} | отсеяно result:{filtered['result']} дубликатов:{filtered['duplicate']} ===", flush=True)
 
 
 # ========== ОБЩЕЕ ==========
@@ -222,7 +348,7 @@ def check_abs_once(seen, first_run, abs_last_id):
                     except Exception:
                         age_min = 999
                     if age_min < 10:
-                        print(f"  [ABS-свежее] {data['status']} | {data['match']} | {data['score']}", flush=True)
+                        print(f"  [ABS-свежее] {data['status']} | {data['match']}", flush=True)
                     else:
                         print(f"  [ABS-калибровка] {data['status']} | {data['match']}", flush=True)
                         continue
@@ -245,7 +371,7 @@ def check_abs_once(seen, first_run, abs_last_id):
                         print(f"  [ABS-WIN] {data['match']} | {data['score']} — пропуск", flush=True)
                     elif data["status"] == "LOSS":
                         print(f"  [ABS-LOSS] {data['match']} — пропуск", flush=True)
-                    time.sleep(2)
+                    time.sleep(1)
                 except Exception as e:
                     print(f"    [ABS] Ошибка: {e}", flush=True)
 
@@ -353,7 +479,7 @@ def check_zlive_once(seen, first_run, zlv_last_id):
                         print(f"  [ZLV-WIN] {data['match']} — пропуск", flush=True)
                     elif data["status"] == "LOSS":
                         print(f"  [ZLV-LOSS] {data['match']} — пропуск", flush=True)
-                    time.sleep(2)
+                    time.sleep(1)
                 except Exception as e:
                     print(f"    [ZLV] Ошибка: {e}", flush=True)
 
@@ -383,6 +509,8 @@ def worker():
 
     while True:
         try:
+            check_zc_once(seen, first_run)
+
             if TG_API_ID and TG_API_HASH and TG_SESSION_B64:
                 check_abs_once(seen, first_run, abs_last_id)
                 check_zlive_once(seen, first_run, zlv_last_id)
