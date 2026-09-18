@@ -22,10 +22,9 @@ API_URL = "https://zcodesystem.com/livebettingbot/get_sport_data.php"
 SEEN_FILE = "seen.json"
 CHECK_EVERY = 60
 
-# Паузы для обхода 404/flood limit Telegram
-SEND_DELAY = 2          # между двумя каналами
-BET_DELAY = 2           # между постами одного источника
-LOOP_DELAY = 1          # между источниками
+SEND_DELAY = 2
+BET_DELAY = 2
+LOOP_DELAY = 1
 
 TG_API_ID = int(os.environ.get("API_ID", "0"))
 TG_API_HASH = os.environ.get("API_HASH", "")
@@ -34,8 +33,8 @@ TG_SESSION_FILE = "mb_session.session"
 
 TG_CHANNEL_ID_ABS = -1001978715517      # AsianBetSports
 
-MB_COLOR_ZC = (180, 255, 100)           # салатовый для zcodesystem
-MB_COLOR_ABS = (100, 180, 255)          # голубой для AsianBetSports
+MB_COLOR_ZC = (180, 255, 100)
+MB_COLOR_ABS = (100, 180, 255)
 # =======================
 
 app = Flask(__name__)
@@ -73,7 +72,6 @@ def load_seen():
 
 
 def save_seen(seen):
-    # атомарная запись: temp + os.replace
     try:
         tmp = SEEN_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -94,7 +92,7 @@ def find_font():
     return None
 
 
-def make_card(pred, mode="open", mb_color=(255, 200, 0), output="card.png"):
+def make_card(pred, mode="open", mb_color=(255, 200, 0), show_odd=True, output="card.png"):
     W, H = 900, 900
     BG, WHITE, GREY = (15, 32, 55), (255, 255, 255), (180, 190, 200)
     ACCENT = mb_color
@@ -133,30 +131,26 @@ def make_card(pred, mode="open", mb_color=(255, 200, 0), output="card.png"):
         draw.text(((W - (bbox[2] - bbox[0])) // 2, y), score_t, fill=WHITE, font=f_score)
 
         y += 160
-        msg = "БУДЕТ ГОЛ"
+        msg = "ОЖИДАЕТСЯ ГОЛ"
         bbox = draw.textbbox((0, 0), msg, font=f_odd)
         draw.text(((W - (bbox[2] - bbox[0])) // 2, y), msg, fill=ACCENT, font=f_odd)
     else:
-        y += 190
-        signal_t = pred.get("signal", "Total Over 0.5") or "Total Over 0.5"
-        bbox = draw.textbbox((0, 0), signal_t, font=f_signal)
-        draw.text(((W - (bbox[2] - bbox[0])) // 2, y), signal_t, fill=WHITE, font=f_signal)
+        y += 160
+        msg = "ОЖИДАЕТСЯ ГОЛ"
+        bbox = draw.textbbox((0, 0), msg, font=f_signal)
+        draw.text(((W - (bbox[2] - bbox[0])) // 2, y), msg, fill=WHITE, font=f_signal)
 
-        y += 130
-        odd = pred.get("odd", "") or ""
-        odd_t = f"@{odd}"
-        bbox = draw.textbbox((0, 0), odd_t, font=f_odd)
-        draw.text(((W - (bbox[2] - bbox[0])) // 2, y), odd_t, fill=ACCENT, font=f_odd)
+        if show_odd and pred.get("odd"):
+            y += 130
+            odd_t = f"@{pred.get('odd', '')}"
+            bbox = draw.textbbox((0, 0), odd_t, font=f_odd)
+            draw.text(((W - (bbox[2] - bbox[0])) // 2, y), odd_t, fill=ACCENT, font=f_odd)
 
     img.save(output)
     return output
 
 
 def tg_post(method, image_path, caption, channel, retries=2):
-    """
-    Универсальная отправка в Telegram.
-    Обрабатывает 404 (flood / chat not found), 429 (rate limit) с ретраями.
-    """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
     for attempt in range(retries + 1):
         try:
@@ -172,13 +166,11 @@ def tg_post(method, image_path, caption, channel, retries=2):
             if code == 200:
                 return 200, r.text[:200]
 
-            # 404 — часто flood или chat not found. Пробуем ещё раз с паузой.
             if code == 404 and attempt < retries:
                 print(f"    [TG] 404, попытка {attempt+2}/{retries+1} через 5с", flush=True)
                 time.sleep(5)
                 continue
 
-            # 429 — rate limit. Читаем retry_after.
             if code == 429:
                 try:
                     retry_after = r.json().get("parameters", {}).get("retry_after", 5)
@@ -215,7 +207,11 @@ def get_data(bet_type=0):
     return r.json()
 
 
-def parse_table(html, table_class):
+def parse_rows(html, table_class):
+    """
+    Возвращает список dict с полями:
+      match_id, data_code, data_time, date, league, match, score, bet, odd
+    """
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -225,44 +221,100 @@ def parse_table(html, table_class):
     tbody = table.find("tbody")
     if not tbody:
         return []
-    results = []
-    for row in tbody.find_all("tr"):
-        cells = row.find_all("td")
-        if len(cells) < 7:
-            continue
+
+    rows = []
+    for tr in tbody.find_all("tr"):
         try:
-            date_parts = cells[0].find_all("p")
-            date = " ".join(p.get_text(strip=True) for p in date_parts)
-            strong = cells[1].find("strong")
-            league = strong.get_text(strip=True) if strong else ""
-            if strong:
-                strong.extract()
-            match = cells[1].get_text(separator=" ", strip=True)
-            score_raw = cells[3].get_text(strip=True) if len(cells) > 3 else ""
-            score_short = score_raw.split("(")[0].strip() if "(" in score_raw else score_raw.strip()
-            signal = cells[4].get_text(strip=True)
-            odd = cells[6].get_text(strip=True)
-            result_cell = row.find("td", class_="result")
-            result_text = result_cell.get_text(strip=True) if result_cell else ""
-            results.append({
-                "league": league, "match": match, "date": date,
-                "score": score_short, "signal": signal, "odd": odd,
-                "result": result_text,
+            classes = tr.get("class", []) or []
+            match_id = ""
+            for c in classes:
+                if c.startswith("g") and c[1:].isdigit():
+                    match_id = c
+                    break
+            data_code = tr.get("data-code", "") or ""
+            data_time = tr.get("data-time", "") or ""
+
+            date_td = tr.find("td", class_="date")
+            game_td = tr.find("td", class_="game")
+            score_td = tr.find("td", class_="score")
+            bet_td = tr.find("td", class_="bet")
+            odd_td = tr.find("td", class_="odd")
+
+            date_txt = date_td.get_text(" ", strip=True) if date_td else ""
+            league = ""
+            match = ""
+            if game_td:
+                strong = game_td.find("strong")
+                if strong:
+                    league = strong.get_text(strip=True)
+                match = game_td.get_text(" ", strip=True)
+                if league and match.startswith(league):
+                    match = match[len(league):].strip()
+
+            score = score_td.get_text(strip=True) if score_td else ""
+            bet = bet_td.get_text(strip=True) if bet_td else ""
+            odd = odd_td.get_text(strip=True) if odd_td else ""
+
+            if not match_id and not match:
+                continue
+
+            rows.append({
+                "match_id": match_id,
+                "data_code": data_code,
+                "data_time": data_time,
+                "date": date_txt,
+                "league": league,
+                "match": match,
+                "score": score,
+                "bet": bet,
+                "odd": odd,
             })
         except Exception as e:
-            print(f"  [ZC parse error] {e}", flush=True)
+            print(f"  [ZC parse row error] {e}", flush=True)
             continue
-    return results
+    return rows
 
 
-def make_zc_key(bet):
-    raw = f"ZC|{bet['league']}|{bet['match']}|{bet['date']}"
+def make_zc_key(row):
+    base = row.get("match_id") or row.get("match") or ""
+    raw = f"ZC|{base}|{row.get('data_code','')}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def total_goals(score_str):
+    """0:2 (0:1, 0:0) → 2"""
+    try:
+        main = score_str.split("(")[0].strip()
+        parts = main.split(":")
+        if len(parts) != 2:
+            return 0
+        return int(parts[0].strip()) + int(parts[1].strip())
+    except Exception:
+        return 0
+
+
+def parse_code_threshold(code):
+    """
+    Over0 → 0 (нужно >= 1 гола)
+    Over1 → 1 (нужно >= 2 голов)
+    Over2 → 2 (нужно >= 3 голов)
+    Over3 → 3
+    Возвращает (type_str, threshold) или (None, None)
+    """
+    if not code:
+        return None, None
+    m = re.match(r"^(Over|Under)(\d+)$", code.strip())
+    if not m:
+        return None, None
+    side = m.group(1).lower()
+    idx = int(m.group(2))
+    # Over0 — это Over 0.5, нужно 1 гол. Over1 — Over 1.5, нужно 2 гола.
+    threshold = idx + 1
+    return side, threshold
+
+
 def check_zc_once(seen, first_run):
-    # Пробуем type=0, type=1, type=2 — берём все источники, чтобы не терять сигналы.
-    all_bets = []
+    all_rows = []
     for bet_type in (0, 1, 2):
         try:
             data = get_data(bet_type=bet_type)
@@ -271,71 +323,102 @@ def check_zc_once(seen, first_run):
             continue
 
         inner = data.get("data", {}) if isinstance(data, dict) else {}
-        bets = (
-            parse_table(inner.get("poss_bets", ""), "poss_bets") +
-            parse_table(inner.get("live_bets", ""), "livebets") +
-            parse_table(inner.get("last_bets", ""), "lastbets")
-        )
-        print(f"[ZC] type={bet_type} найдено: {len(bets)}", flush=True)
-        all_bets.extend(bets)
 
-    # Дедуп внутри одного прохода
+        poss = inner.get("poss_bets", "") or ""
+        live = inner.get("live_bets", "") or ""
+        last = inner.get("last_bets", "") or ""
+
+        # Отладка: показать начало live_bets
+        if live:
+            print(f"[ZC] type={bet_type} live_bets len={len(live)}", flush=True)
+            print(f"[ZC] live_bets preview: {live[:500]}", flush=True)
+
+        for r in parse_rows(poss, "poss_bets"):
+            r["_table"] = "poss"
+            all_rows.append(r)
+        for r in parse_rows(live, "livebets"):
+            r["_table"] = "live"
+            all_rows.append(r)
+        # last_bets пропускаем — там история, всё с result
+
+    # Дедуп по ключу внутри прохода
     unique = {}
-    for bet in all_bets:
-        k = make_zc_key(bet)
+    for r in all_rows:
+        k = make_zc_key(r)
         if k not in unique:
-            unique[k] = bet
-    all_bets = list(unique.values())
+            unique[k] = r
+    all_rows = list(unique.values())
 
     published_open = 0
     published_grey = 0
-    filtered = {"result": 0, "duplicate": 0, "noscore": 0, "first_run": 0}
+    filtered = {"table": 0, "unlock": 0, "dup": 0, "goals": 0, "first_run": 0, "no_code": 0}
 
-    print(f"[ZC] === Всего уникальных прогнозов: {len(all_bets)} ===", flush=True)
+    print(f"[ZC] === Всего строк: {len(all_rows)} ===", flush=True)
 
-    for bet in all_bets:
-        if bet["result"]:
-            r = bet["result"].strip().lower()
-            if r.startswith(("win", "loss", "void", "push", "half win", "half loss")):
-                filtered["result"] += 1
-                continue
+    for row in all_rows:
+        if row["_table"] == "poss":
+            filtered["table"] += 1
+            continue
 
-        key = make_zc_key(bet)
+        code = row.get("data_code", "")
+        side, threshold = parse_code_threshold(code)
+        if side is None:
+            filtered["no_code"] += 1
+            continue
+
+        # Отсеиваем ТМ для MB 1 (в MB 2 тоже пока не публикуем — только по запросу)
+        # По правилам: Under → только MB 2, но пока отключим.
+        is_under = (side == "under")
+
+        # Проверка на уже забитые голы
+        goals = total_goals(row.get("score", ""))
+        if threshold is not None and goals >= threshold:
+            filtered["goals"] += 1
+            continue
+
+        key = make_zc_key(row)
         if key in seen:
-            filtered["duplicate"] += 1
+            filtered["dup"] += 1
             continue
         seen.add(key)
-
-        signal_low = (bet["signal"] or "").lower()
-        odd_low = (bet["odd"] or "").lower()
-        is_grey = ("unlock" in signal_low) or ("unlock" in odd_low)
 
         if first_run:
             filtered["first_run"] += 1
             continue
 
         try:
-            if is_grey:
-                if not bet.get("score") or "unlock" in bet["score"].lower():
-                    filtered["noscore"] += 1
-                    continue
-                img = make_card(bet, mode="grey", mb_color=MB_COLOR_ZC)
-                caption = f"{bet['league']}\n{bet['match']}\nСчёт: {bet['score']}\nБУДЕТ ГОЛ"
-                code, _ = send_to_telegram(img, caption, CHANNEL_GREY)
-                print(f"  ✅ [ZC-GREY] {bet['match']} | {bet['score']} | TG: {code}", flush=True)
+            if is_under:
+                # Under → только MB 2, кэф показываем
+                img = make_card(row, mode="open", mb_color=MB_COLOR_ZC, show_odd=True)
+                caption = f"{row['league']}\n{row['match']}\nОЖИДАЕТСЯ ГОЛ (Under)"
+                code_send, _ = send_to_telegram(img, caption, CHANNEL_GREY)
+                print(f"  ✅ [ZC-GREY Under] {row['match']} | TG: {code_send}", flush=True)
                 published_grey += 1
             else:
-                img = make_card(bet, mode="open", mb_color=MB_COLOR_ZC)
-                caption = f"{bet['league']}\n{bet['match']}\n{bet['signal']} @ {bet['odd']}"
-                code, _ = send_to_telegram(img, caption, CHANNEL_OPEN)
-                print(f"  ✅ [ZC-OPEN] {bet['match']} | {bet['signal']} | TG: {code}", flush=True)
+                # Over → MB 1 (без кэфа) и MB 2 (с кэфом)
+                img1 = make_card(row, mode="open", mb_color=MB_COLOR_ZC, show_odd=False)
+                caption1 = f"{row['league']}\n{row['match']}\nОЖИДАЕТСЯ ГОЛ"
+                code1, _ = send_to_telegram(img1, caption1, CHANNEL_OPEN)
+                print(f"  [ZC-OPEN] {row['match']} | {code} | MB1: {code1}", flush=True)
+                time.sleep(SEND_DELAY)
+
+                img2 = make_card(row, mode="open", mb_color=MB_COLOR_ZC, show_odd=True)
+                caption2 = f"{row['league']}\n{row['match']}\nОЖИДАЕТСЯ ГОЛ @ {row.get('odd','')}"
+                code2, _ = send_to_telegram(img2, caption2, CHANNEL_GREY)
+                print(f"  ✅ [ZC-OPEN] {row['match']} | {code} | MB2: {code2}", flush=True)
                 published_open += 1
+
             time.sleep(BET_DELAY)
         except Exception as e:
             print(f"    [ZC] Ошибка публикации: {e}", flush=True)
 
     save_seen(seen)
-    print(f"[ZC] === Итог: open {published_open} | grey {published_grey} | result:{filtered['result']} dup:{filtered['duplicate']} ===", flush=True)
+    print(
+        f"[ZC] === Итог: open {published_open} | grey {published_grey} | "
+        f"фильтр: poss:{filtered['table']} nogoals:{filtered['goals']} dup:{filtered['dup']} "
+        f"nocode:{filtered['no_code']} first:{filtered['first_run']} ===",
+        flush=True
+    )
 
 
 # ========== ASIANBETSPORTS ==========
@@ -424,22 +507,23 @@ def check_abs_once(seen, first_run, abs_last_id):
 
                     try:
                         if data["status"] == "CONFIRMED":
-                            img = make_card(data, mode="open", mb_color=MB_COLOR_ABS)
-                            caption = f"{data['league']}\n{data['match']}\n{data['signal']}"
-                            code1, resp1 = send_to_telegram(img, caption, CHANNEL_OPEN)
+                            img1 = make_card(data, mode="open", mb_color=MB_COLOR_ABS, show_odd=False)
+                            caption1 = f"{data['league']}\n{data['match']}\nОЖИДАЕТСЯ ГОЛ"
+                            code1, _ = send_to_telegram(img1, caption1, CHANNEL_OPEN)
                             print(f"  [ABS-CONFIRMED] {data['match']} | MB1: {code1}", flush=True)
                             time.sleep(SEND_DELAY)
-                            code2, resp2 = send_to_telegram(img, caption, CHANNEL_GREY)
+
+                            img2 = make_card(data, mode="open", mb_color=MB_COLOR_ABS, show_odd=True)
+                            caption2 = f"{data['league']}\n{data['match']}\nОЖИДАЕТСЯ ГОЛ @ 0.5"
+                            code2, _ = send_to_telegram(img2, caption2, CHANNEL_GREY)
                             print(f"  ✅ [ABS-CONFIRMED] {data['match']} | MB2: {code2}", flush=True)
-                            if code1 == 200 or code2 == 200:
-                                published += 1
+                            published += 1
                         elif data["status"] == "ANNOUNCE":
-                            img = make_card(data, mode="grey", mb_color=MB_COLOR_ABS)
-                            caption = f"{data['league']}\n{data['match']}\nСчёт: {data['score']}\nБУДЕТ ГОЛ"
+                            img = make_card(data, mode="grey", mb_color=MB_COLOR_ABS, show_odd=True)
+                            caption = f"{data['league']}\n{data['match']}\nСчёт: {data['score']}\nОЖИДАЕТСЯ ГОЛ"
                             code, _ = send_to_telegram(img, caption, CHANNEL_GREY)
                             print(f"  ✅ [ABS-ANNOUNCE] {data['match']} | TG: {code}", flush=True)
-                            if code == 200:
-                                published += 1
+                            published += 1
                         elif data["status"] == "WIN":
                             print(f"  [ABS-WIN] {data['match']} | {data['score']} — пропуск", flush=True)
                         elif data["status"] == "LOSS":
