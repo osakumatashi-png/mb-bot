@@ -38,17 +38,75 @@ if not BOT_TOKEN:
 
 app = Flask(__name__)
 
+# Кэш: какой type сработал (0, 1 или 2). Определяется автоматически.
+ZC_WORKING_TYPE = None
+
 
 # ========== ZCODESYSTEM ==========
 
-def get_data():
-    payload = {"sport": "SOCCER", "lang": "en", "type": 0}
+def _try_type(t):
+    """Пробует один type. Возвращает (data, есть_ли_данные)."""
+    payload = {"sport": "SOCCER", "lang": "en", "type": t}
     headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 10)",
         "X-Requested-With": "XMLHttpRequest"
     }
-    r = requests.post(API_URL, data=payload, headers=headers, timeout=30)
-    return r.json()
+    try:
+        r = requests.post(API_URL, data=payload, headers=headers, timeout=30)
+        data = r.json()
+    except Exception as e:
+        print(f"[ZC] type={t} ошибка запроса: {e}", flush=True)
+        return None, False
+
+    inner = data.get("data", {}) if isinstance(data, dict) else {}
+    poss = inner.get("poss_bets", "") or ""
+    live = inner.get("live_bets", "") or ""
+
+    # Признак реальных данных: poss_bets не пустой ИЛИ live_bets содержит строки данных
+    has_data = (len(poss.strip()) > 0) or ("data-id=" in live)
+    return data, has_data
+
+
+def get_data():
+    """
+    Автоматически находит рабочий type (0/1/2), где есть активные сигналы.
+    Результат кэшируется в ZC_WORKING_TYPE.
+    """
+    global ZC_WORKING_TYPE
+
+    # Если уже нашли рабочий — используем его
+    if ZC_WORKING_TYPE is not None:
+        payload = {"sport": "SOCCER", "lang": "en", "type": ZC_WORKING_TYPE}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10)",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        r = requests.post(API_URL, data=payload, headers=headers, timeout=30)
+        return r.json()
+
+    # Первый раз — перебираем type 0, 1, 2
+    print("[ZC] Поиск рабочего type...", flush=True)
+    fallback_data = None
+    for t in (0, 1, 2):
+        data, has_data = _try_type(t)
+        if data is None:
+            continue
+        if fallback_data is None:
+            fallback_data = (t, data)
+        if has_data:
+            ZC_WORKING_TYPE = t
+            print(f"[ZC] ✅ Рабочий type={t} (есть активные сигналы)", flush=True)
+            return data
+        else:
+            print(f"[ZC] type={t} — активных сигналов нет", flush=True)
+
+    # Ни один не дал активных — работаем с тем, что есть (архив)
+    if fallback_data is not None:
+        ZC_WORKING_TYPE = fallback_data[0]
+        print(f"[ZC] ⚠️ Ни один type не дал активных. Работаем с type={ZC_WORKING_TYPE} (архив)", flush=True)
+        return fallback_data[1]
+
+    raise RuntimeError("ZC: не удалось получить данные ни с одним type")
 
 
 def parse_table(html, table_class):
