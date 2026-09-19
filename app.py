@@ -212,11 +212,13 @@ def check_zc_once(seen, first_run):
         if key in seen:
             skipped += 1
             continue
-        seen.add(key)
 
         if first_run:
+            # Калибровка: НЕ публикуем и НЕ записываем в seen — вернёмся к нему на след. цикле
             skipped += 1
             continue
+
+        seen.add(key)
 
         try:
             img = make_card(bet, mb_color=MB_COLOR_ZC)
@@ -233,22 +235,10 @@ def check_zc_once(seen, first_run):
 
 
 def make_zc_caption(bet):
-    kind = bet.get("kind")
     league = bet.get("league", "")
     match = bet.get("match", "")
     score = bet.get("score", "")
-    signal = bet.get("signal", "")
-    odd = bet.get("odd", "")
-
-    if kind == "unconfirmed":
-        return f"{league}\n{match}\nСчёт: {score}\nОжидается гол"
-
-    if not signal or signal.lower() == "unlock":
-        return f"{league}\n{match}\nСчёт: {score}\nОжидается гол"
-
-    if odd and odd.lower() != "unlock":
-        return f"{league}\n{match}\nСчёт: {score}\n{signal} @ {odd}"
-    return f"{league}\n{match}\nСчёт: {score}\n{signal}"
+    return f"{league}\n{match}\nСчёт: {score}\nБУДЕТ ГОЛ"
 
 
 # ========== ОБЩЕЕ ==========
@@ -303,47 +293,44 @@ def make_card(pred, mb_color=MB_COLOR_ZC, output="card.png"):
     fp = find_font()
     if fp:
         f_mb = ImageFont.truetype(fp, 200)
+        f_goal = ImageFont.truetype(fp, 90)
         f_league = ImageFont.truetype(fp, 40)
         f_match = ImageFont.truetype(fp, 52)
-        f_signal = ImageFont.truetype(fp, 46)
-        f_odd = ImageFont.truetype(fp, 64)
         f_score = ImageFont.truetype(fp, 90)
     else:
-        f_mb = f_league = f_match = f_signal = f_odd = f_score = ImageFont.load_default()
+        f_mb = f_goal = f_league = f_match = f_score = ImageFont.load_default()
 
+    # Верх: MB
     bbox = draw.textbbox((0, 0), "MB", font=f_mb)
-    draw.text(((W - (bbox[2] - bbox[0])) // 2 - bbox[0], 80), "MB", fill=ACCENT, font=f_mb)
-    line_y = 80 + (bbox[3] - bbox[1]) + 80
+    draw.text(((W - (bbox[2] - bbox[0])) // 2 - bbox[0], 60), "MB", fill=ACCENT, font=f_mb)
+
+    # Цветная полоса
+    line_y = 60 + (bbox[3] - bbox[1]) + 50
     draw.line([(100, line_y), (W - 100, line_y)], fill=ACCENT, width=4)
 
-    y = line_y + 60
+    # Под полосой: БУДЕТ ГОЛ (крупно)
+    y = line_y + 50
+    goal_t = "БУДЕТ ГОЛ"
+    bbox = draw.textbbox((0, 0), goal_t, font=f_goal)
+    draw.text(((W - (bbox[2] - bbox[0])) // 2, y), goal_t, fill=ACCENT, font=f_goal)
+
+    # Лига
+    y += 180
     league_t = pred.get("league", "")
     bbox = draw.textbbox((0, 0), league_t, font=f_league)
     draw.text(((W - (bbox[2] - bbox[0])) // 2, y), league_t, fill=GREY, font=f_league)
 
-    y += 110
+    # Матч
+    y += 100
     match_t = pred.get("match", "")
     bbox = draw.textbbox((0, 0), match_t, font=f_match)
     draw.text(((W - (bbox[2] - bbox[0])) // 2, y), match_t, fill=WHITE, font=f_match)
 
-    y += 130
+    # Счёт
+    y += 120
     score_t = pred.get("score", "") or "0:0"
     bbox = draw.textbbox((0, 0), score_t, font=f_score)
     draw.text(((W - (bbox[2] - bbox[0])) // 2, y), score_t, fill=WHITE, font=f_score)
-
-    y += 160
-    signal_t = pred.get("signal", "") or "Ожидается гол"
-    if signal_t.lower() == "unlock":
-        signal_t = "Ожидается гол"
-    bbox = draw.textbbox((0, 0), signal_t, font=f_signal)
-    draw.text(((W - (bbox[2] - bbox[0])) // 2, y), signal_t, fill=ACCENT, font=f_signal)
-
-    odd = pred.get("odd", "")
-    if odd and odd.lower() != "unlock":
-        y += 120
-        odd_t = f"@{odd}"
-        bbox = draw.textbbox((0, 0), odd_t, font=f_odd)
-        draw.text(((W - (bbox[2] - bbox[0])) // 2, y), odd_t, fill=ACCENT, font=f_odd)
 
     img.save(output)
     return output
@@ -429,29 +416,24 @@ def check_abs_once(seen, first_run, abs_last_id):
                 key = make_abs_key(data)
                 if key in seen:
                     continue
-                seen.add(key)
 
                 if first_run:
-                    try:
-                        age_min = (datetime.now(timezone.utc) - message.date).total_seconds() / 60
-                    except Exception:
-                        age_min = 999
-                    if age_min < 10:
-                        print(f"  [ABS-свежее] {data['status']} | {data['match']}", flush=True)
-                    else:
-                        print(f"  [ABS-калибровка] {data['status']} | {data['match']}", flush=True)
-                        continue
+                    # Калибровка: не публикуем и не пишем в seen
+                    print(f"  [ABS-калибровка] {data['status']} | {data['match']}", flush=True)
+                    continue
+
+                seen.add(key)
 
                 try:
                     if data["status"] == "CONFIRMED":
                         img = make_card(data, mb_color=MB_COLOR_ABS)
-                        caption = f"{data['league']}\n{data['match']}\n{data['signal']}"
+                        caption = f"{data['league']}\n{data['match']}\nСчёт: {data['score']}\nБУДЕТ ГОЛ"
                         code, _ = send_to_telegram(img, caption, CHANNEL_MAIN)
                         print(f"  ✅ [ABS-CONFIRMED] {data['match']} | TG: {code}", flush=True)
                         published += 1
                     elif data["status"] == "ANNOUNCE":
                         img = make_card(data, mb_color=MB_COLOR_ABS)
-                        caption = f"{data['league']}\n{data['match']}\nСчёт: {data['score']}\nОжидается гол"
+                        caption = f"{data['league']}\n{data['match']}\nСчёт: {data['score']}\nБУДЕТ ГОЛ"
                         code, _ = send_to_telegram(img, caption, CHANNEL_MAIN)
                         print(f"  ✅ [ABS-ANNOUNCE] {data['match']} | TG: {code}", flush=True)
                         published += 1
