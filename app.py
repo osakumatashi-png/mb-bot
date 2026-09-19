@@ -150,49 +150,24 @@ def make_card(pred, mode="open", mb_color=(255, 200, 0), show_odd=True, output="
     return output
 
 
-def tg_post(method, image_path, caption, channel, retries=2):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-    for attempt in range(retries + 1):
-        try:
-            if image_path:
-                with open(image_path, "rb") as f:
-                    files = {"photo": f}
-                    data = {"chat_id": channel, "caption": caption}
-                    r = requests.post(url, files=files, data=data, timeout=60)
-            else:
-                r = requests.post(url, data={"chat_id": channel, "caption": caption}, timeout=60)
-
-            code = r.status_code
-            if code == 200:
-                return 200, r.text[:200]
-
-            if code == 404 and attempt < retries:
-                print(f"    [TG] 404, попытка {attempt+2}/{retries+1} через 5с", flush=True)
-                time.sleep(5)
-                continue
-
-            if code == 429:
-                try:
-                    retry_after = r.json().get("parameters", {}).get("retry_after", 5)
-                except Exception:
-                    retry_after = 5
-                if attempt < retries:
-                    print(f"    [TG] 429, ждём {retry_after}с", flush=True)
-                    time.sleep(retry_after + 1)
-                    continue
-
-            return code, r.text[:200]
-        except requests.exceptions.RequestException as e:
-            print(f"    [TG] Сетевая ошибка: {e}", flush=True)
-            if attempt < retries:
-                time.sleep(3)
-                continue
-            return 0, str(e)[:200]
-    return 0, "retries exhausted"
-
-
 def send_to_telegram(image_path, caption, channel):
-    return tg_post("sendPhoto", image_path, caption, channel)
+    """
+    Отправка фото в Telegram через sendPhoto.
+    Все поля передаём через multipart (files), а не через data.
+    Это правильный формат для sendPhoto с файлом.
+    """
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    try:
+        with open(image_path, "rb") as f:
+            files = {
+                "photo": ("card.png", f, "image/png"),
+                "chat_id": (None, str(channel)),
+                "caption": (None, caption),
+            }
+            r = requests.post(url, files=files, timeout=60)
+        return r.status_code, r.text[:200]
+    except Exception as e:
+        return 0, str(e)[:200]
 
 
 # ========== ZCODESYSTEM ==========
@@ -208,10 +183,6 @@ def get_data(bet_type=0):
 
 
 def parse_rows(html, table_class):
-    """
-    Возвращает список dict с полями:
-      match_id, data_code, data_time, date, league, match, score, bet, odd
-    """
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -282,7 +253,6 @@ def make_zc_key(row):
 
 
 def total_goals(score_str):
-    """0:2 (0:1, 0:0) → 2"""
     try:
         main = score_str.split("(")[0].strip()
         parts = main.split(":")
@@ -294,13 +264,6 @@ def total_goals(score_str):
 
 
 def parse_code_threshold(code):
-    """
-    Over0 → 0 (нужно >= 1 гола)
-    Over1 → 1 (нужно >= 2 голов)
-    Over2 → 2 (нужно >= 3 голов)
-    Over3 → 3
-    Возвращает (type_str, threshold) или (None, None)
-    """
     if not code:
         return None, None
     m = re.match(r"^(Over|Under)(\d+)$", code.strip())
@@ -308,7 +271,6 @@ def parse_code_threshold(code):
         return None, None
     side = m.group(1).lower()
     idx = int(m.group(2))
-    # Over0 — это Over 0.5, нужно 1 гол. Over1 — Over 1.5, нужно 2 гола.
     threshold = idx + 1
     return side, threshold
 
@@ -323,15 +285,11 @@ def check_zc_once(seen, first_run):
             continue
 
         inner = data.get("data", {}) if isinstance(data, dict) else {}
-
         poss = inner.get("poss_bets", "") or ""
         live = inner.get("live_bets", "") or ""
-        last = inner.get("last_bets", "") or ""
 
-        # Отладка: показать начало live_bets
         if live:
             print(f"[ZC] type={bet_type} live_bets len={len(live)}", flush=True)
-            print(f"[ZC] live_bets preview: {live[:500]}", flush=True)
 
         for r in parse_rows(poss, "poss_bets"):
             r["_table"] = "poss"
@@ -339,9 +297,7 @@ def check_zc_once(seen, first_run):
         for r in parse_rows(live, "livebets"):
             r["_table"] = "live"
             all_rows.append(r)
-        # last_bets пропускаем — там история, всё с result
 
-    # Дедуп по ключу внутри прохода
     unique = {}
     for r in all_rows:
         k = make_zc_key(r)
@@ -351,7 +307,7 @@ def check_zc_once(seen, first_run):
 
     published_open = 0
     published_grey = 0
-    filtered = {"table": 0, "unlock": 0, "dup": 0, "goals": 0, "first_run": 0, "no_code": 0}
+    filtered = {"table": 0, "dup": 0, "goals": 0, "first_run": 0, "no_code": 0}
 
     print(f"[ZC] === Всего строк: {len(all_rows)} ===", flush=True)
 
@@ -366,11 +322,8 @@ def check_zc_once(seen, first_run):
             filtered["no_code"] += 1
             continue
 
-        # Отсеиваем ТМ для MB 1 (в MB 2 тоже пока не публикуем — только по запросу)
-        # По правилам: Under → только MB 2, но пока отключим.
         is_under = (side == "under")
 
-        # Проверка на уже забитые голы
         goals = total_goals(row.get("score", ""))
         if threshold is not None and goals >= threshold:
             filtered["goals"] += 1
@@ -388,14 +341,12 @@ def check_zc_once(seen, first_run):
 
         try:
             if is_under:
-                # Under → только MB 2, кэф показываем
                 img = make_card(row, mode="open", mb_color=MB_COLOR_ZC, show_odd=True)
-                caption = f"{row['league']}\n{row['match']}\nОЖИДАЕТСЯ ГОЛ (Under)"
+                caption = f"{row['league']}\n{row['match']}\nОЖИДАЕТСЯ ГОЛ"
                 code_send, _ = send_to_telegram(img, caption, CHANNEL_GREY)
                 print(f"  ✅ [ZC-GREY Under] {row['match']} | TG: {code_send}", flush=True)
                 published_grey += 1
             else:
-                # Over → MB 1 (без кэфа) и MB 2 (с кэфом)
                 img1 = make_card(row, mode="open", mb_color=MB_COLOR_ZC, show_odd=False)
                 caption1 = f"{row['league']}\n{row['match']}\nОЖИДАЕТСЯ ГОЛ"
                 code1, _ = send_to_telegram(img1, caption1, CHANNEL_OPEN)
@@ -415,7 +366,7 @@ def check_zc_once(seen, first_run):
     save_seen(seen)
     print(
         f"[ZC] === Итог: open {published_open} | grey {published_grey} | "
-        f"фильтр: poss:{filtered['table']} nogoals:{filtered['goals']} dup:{filtered['dup']} "
+        f"poss:{filtered['table']} nogoals:{filtered['goals']} dup:{filtered['dup']} "
         f"nocode:{filtered['no_code']} first:{filtered['first_run']} ===",
         flush=True
     )
@@ -514,7 +465,7 @@ def check_abs_once(seen, first_run, abs_last_id):
                             time.sleep(SEND_DELAY)
 
                             img2 = make_card(data, mode="open", mb_color=MB_COLOR_ABS, show_odd=True)
-                            caption2 = f"{data['league']}\n{data['match']}\nОЖИДАЕТСЯ ГОЛ @ 0.5"
+                            caption2 = f"{data['league']}\n{data['match']}\nОЖИДАЕТСЯ ГОЛ"
                             code2, _ = send_to_telegram(img2, caption2, CHANNEL_GREY)
                             print(f"  ✅ [ABS-CONFIRMED] {data['match']} | MB2: {code2}", flush=True)
                             published += 1
