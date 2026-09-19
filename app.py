@@ -54,35 +54,73 @@ def _clean(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _extract_game(td):
+    """Из td.game вытаскивает league + match."""
+    strong = td.find("strong")
+    league = _clean(strong.get_text()) if strong else ""
+    if strong:
+        strong.extract()
+    match = _clean(td.get_text(" ", strip=True))
+    return league, match
+
+
+def _extract_date(td):
+    """Из td.date берёт дату (все <p>, склеенные)."""
+    parts = td.find_all("p")
+    if parts:
+        return _clean(" ".join(p.get_text(strip=True) for p in parts))
+    return _clean(td.get_text(" ", strip=True))
+
+
+def _extract_score(td):
+    raw = _clean(td.get_text(" ", strip=True))
+    if "(" in raw:
+        return raw.split("(")[0].strip()
+    return raw
+
+
 def parse_live_signals(soup):
+    """Парсит блок Live Signals внутри div.TBets.LiveBets."""
     results = []
-    h = soup.find(lambda tag: tag.name in ("h2", "h3", "h4")
-                  and "Live Signals" in tag.get_text())
-    if not h:
+    container = soup.find("div", class_=lambda x: x and "TBets" in x and "LiveBets" in x)
+    if not container:
         return results
-    table = h.find_next("table")
+
+    table = container.find("table")
     if not table:
         return results
+
     tbody = table.find("tbody")
     if not tbody:
         return results
 
     for row in tbody.find_all("tr"):
-        cells = row.find_all("td")
-        if len(cells) < 6:
+        classes = row.get("class", [])
+        # Строки Live Signals имеют класс вида ["SOCCER", "g64005123"] или ["HOCKEY", ...]
+        if not classes:
             continue
-        try:
-            date = _clean(cells[0].get_text(" ", strip=True))
-            game_cell = cells[1]
-            strong = game_cell.find("strong")
-            league = _clean(strong.get_text()) if strong else ""
-            if strong:
-                strong.extract()
-            match = _clean(game_cell.get_text(" ", strip=True))
 
-            score = _clean(cells[3].get_text(" ", strip=True)) if len(cells) > 3 else ""
-            signal = _clean(cells[4].get_text(" ", strip=True)) if len(cells) > 4 else ""
-            odd = _clean(cells[6].get_text(" ", strip=True)) if len(cells) > 6 else ""
+        try:
+            date_td = row.find("td", class_=lambda x: x and "date" in x.split())
+            game_td = row.find("td", class_=lambda x: x and "game" in x.split())
+            score_td = row.find("td", class_=lambda x: x and "score" in x.split())
+            bet_td = row.find("td", class_=lambda x: x and "bet" in x.split())
+            odd_td = row.find("td", class_=lambda x: x and "odd" in x.split())
+            result_td = row.find("td", class_=lambda x: x and "result" in x.split())
+
+            if not game_td:
+                continue
+
+            date = _extract_date(date_td) if date_td else ""
+            league, match = _extract_game(game_td)
+            score = _extract_score(score_td) if score_td else ""
+            signal = _clean(bet_td.get_text(" ", strip=True)) if bet_td else ""
+            odd = _clean(odd_td.get_text(" ", strip=True)) if odd_td else ""
+            result = _clean(result_td.get_text(" ", strip=True)) if result_td else ""
+
+            # Если есть результат (Win/Loss) — это уже архив в LiveBets, не публикуем.
+            if result:
+                continue
 
             if not match:
                 continue
@@ -91,7 +129,7 @@ def parse_live_signals(soup):
                 "league": league,
                 "match": match,
                 "date": date,
-                "score": score.split("(")[0].strip() if "(" in score else score,
+                "score": score,
                 "signal": signal,
                 "odd": odd,
                 "kind": "live",
@@ -99,37 +137,41 @@ def parse_live_signals(soup):
         except Exception as e:
             print(f"  [parse live error] {e}", flush=True)
             continue
+
     return results
 
 
 def parse_unconfirmed(soup):
+    """Парсит блок Unconfirmed bets внутри div.PossBets."""
     results = []
-    h = soup.find(lambda tag: tag.name in ("h2", "h3", "h4")
-                  and "Unconfirmed bets" in tag.get_text())
-    if not h:
+    container = soup.find("div", class_="PossBets")
+    if not container:
         return results
-    table = h.find_next("table")
+
+    table = container.find("table")
     if not table:
         return results
+
     tbody = table.find("tbody")
     if not tbody:
         return results
 
     for row in tbody.find_all("tr"):
-        cells = row.find_all("td")
-        if len(cells) < 4:
+        if not row.get("data-id"):
             continue
         try:
-            date = _clean(cells[0].get_text(" ", strip=True))
-            game_cell = cells[1]
-            strong = game_cell.find("strong")
-            league = _clean(strong.get_text()) if strong else ""
-            if strong:
-                strong.extract()
-            match = _clean(game_cell.get_text(" ", strip=True))
+            date_td = row.find("td", class_=lambda x: x and "date" in x.split())
+            game_td = row.find("td", class_=lambda x: x and "game" in x.split())
+            score_td = row.find("td", class_=lambda x: x and "score" in x.split())
+            bet_td = row.find("td", class_=lambda x: x and "bet" in x.split())
 
-            score = _clean(cells[2].get_text(" ", strip=True)) if len(cells) > 2 else ""
-            signal = _clean(cells[3].get_text(" ", strip=True)) if len(cells) > 3 else ""
+            if not game_td:
+                continue
+
+            date = _extract_date(date_td) if date_td else ""
+            league, match = _extract_game(game_td)
+            score = _extract_score(score_td) if score_td else ""
+            signal = _clean(bet_td.get_text(" ", strip=True)) if bet_td else ""
 
             if not match:
                 continue
@@ -138,7 +180,7 @@ def parse_unconfirmed(soup):
                 "league": league,
                 "match": match,
                 "date": date,
-                "score": score.split("(")[0].strip() if "(" in score else score,
+                "score": score,
                 "signal": signal,
                 "odd": "",
                 "kind": "unconfirmed",
@@ -146,6 +188,7 @@ def parse_unconfirmed(soup):
         except Exception as e:
             print(f"  [parse unconf error] {e}", flush=True)
             continue
+
     return results
 
 
