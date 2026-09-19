@@ -151,15 +151,17 @@ def make_card(pred, mode="open", mb_color=(255, 200, 0), show_odd=True, output="
 
 
 def send_to_telegram(image_path, caption, channel):
+    """
+    Стандартный синтаксис Telegram Bot API:
+      - файл фото -> files
+      - chat_id и caption -> data (обычные form-поля)
+    """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     try:
         with open(image_path, "rb") as f:
-            files = {
-                "photo": ("card.png", f, "image/png"),
-                "chat_id": (None, str(channel)),
-                "caption": (None, caption),
-            }
-            r = requests.post(url, files=files, timeout=60)
+            files = {"photo": ("card.png", f, "image/png")}
+            data = {"chat_id": str(channel), "caption": caption}
+            r = requests.post(url, files=files, data=data, timeout=60)
         return r.status_code, r.text[:200]
     except Exception as e:
         return 0, str(e)[:200]
@@ -178,7 +180,6 @@ def get_data(bet_type=0):
 
 
 def clean_text(td):
-    """Извлекает текст из td, схлопывает пробелы и переносы."""
     if not td:
         return ""
     txt = td.get_text(" ", strip=True)
@@ -189,9 +190,8 @@ def clean_text(td):
 def parse_signal_text(bet_text):
     """
     'Total Over 1.5 Goals' -> ('over', 2)
-    'Total Over 0.5 Goals' -> ('over', 1)
+    'Over 0.5'             -> ('over', 1)
     'Total Under 2.5 Goals' -> ('under', 2)
-    Возвращает (side, threshold) или (None, None).
     """
     if not bet_text:
         return None, None
@@ -206,24 +206,6 @@ def parse_signal_text(bet_text):
 
 
 def parse_rows(html, table_class):
-    """
-    Универсальный парсер строк таблицы.
-    Структуры двух видов:
-      poss_bets:  <tr class="SOCCER g64006829" data-code="Over0">
-                    <td class="date">...</td><td class="game">...</td>
-                    <td class="score">...</td><td class="bet">Unconfirmed Signal</td>
-                  </tr>
-      live_bets:  <tr data-id="1874676" class="odd H4">
-                    <td class="date" rowspan="2">...</td>
-                    <td class="game borderBnone">...</td>
-                    <td class="score borderBnone">...</td>
-                    <td class="s_date borderBnone">...</td>
-                    <td class="bet borderBnone">Total Over 0.5 Goals</td>
-                    <td class="unit borderBnone">1</td>
-                    <td class="odd borderBnone">1.360</td>
-                    <td class="result Win borderBnone">Win</td>
-                  </tr>
-    """
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -241,7 +223,6 @@ def parse_rows(html, table_class):
             data_id = tr.get("data-id", "") or ""
             data_code = tr.get("data-code", "") or ""
 
-            # match_id: data-id (live_bets) или gXXXXX из class (poss_bets)
             match_id = data_id
             if not match_id:
                 for c in classes:
@@ -249,7 +230,7 @@ def parse_rows(html, table_class):
                         match_id = c
                         break
 
-            # Пропускаем строки hot-трендов (у них нет game)
+            # Пропускаем hot-тренды (нет td.game)
             if "hot" in classes and not tr.find("td", class_="game"):
                 continue
 
@@ -300,7 +281,6 @@ def make_zc_key(row):
 
 
 def total_goals(score_str):
-    """'1:0 (0:0, 1:0)' -> 1"""
     try:
         main = score_str.split("(")[0].strip()
         parts = main.split(":")
@@ -355,7 +335,6 @@ def check_zc_once(seen, first_run):
         bet_text = row.get("bet", "") or ""
         bet_low = bet_text.strip().lower()
 
-        # Unlock / Unconfirmed — пропуск
         if "unlock" in bet_low or "unconfirmed" in bet_low:
             filtered["unlock"] += 1
             continue
@@ -368,7 +347,6 @@ def check_zc_once(seen, first_run):
 
         is_under = (side == "under")
 
-        # Фильтр «гол уже забит»: если голов >= порога — пропуск
         goals = total_goals(row.get("score", ""))
         if threshold is not None and goals >= threshold:
             filtered["goals"] += 1
