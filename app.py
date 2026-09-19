@@ -36,6 +36,8 @@ TG_CHANNEL_ID_ABS = -1001978715517      # AsianBetSports
 
 MB_COLOR_ZC = (180, 255, 100)
 MB_COLOR_ABS = (100, 180, 255)
+
+CATBOX_API = "https://catbox.moe/user/api.php"
 # =======================
 
 app = Flask(__name__)
@@ -171,45 +173,46 @@ def make_card(pred, mode="open", mb_color=(255, 200, 0), show_odd=True, output="
     return output
 
 
-def send_to_telegram(image_path, caption, channel):
+def upload_image(image_path):
     """
-    Двухшаговая отправка:
-      1. sendPhoto без caption (чистый multipart с файлом, без кириллицы).
-      2. editMessageCaption отдельным POST с кириллицей.
+    Заливает PNG на catbox.moe.
+    Возвращает URL или None.
     """
-    # Шаг 1 — фото без подписи
-    url_photo = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     try:
         with open(image_path, "rb") as f:
-            files = {"photo": ("card.png", f, "image/png")}
-            data = {"chat_id": str(channel)}
-            r1 = requests.post(url_photo, files=files, data=data, timeout=60)
+            files = {"fileToUpload": ("card.png", f, "image/png")}
+            data = {"reqtype": "fileupload"}
+            r = requests.post(CATBOX_API, files=files, data=data, timeout=60)
+        if r.status_code == 200 and r.text.strip().startswith("http"):
+            return r.text.strip()
+        print(f"    [CATBOX] upload fail: {r.status_code} {r.text[:200]}", flush=True)
+        return None
     except Exception as e:
-        return 0, f"step1 error: {str(e)[:200]}"
+        print(f"    [CATBOX] error: {e}", flush=True)
+        return None
 
-    if r1.status_code != 200:
-        return r1.status_code, f"step1: {r1.text[:200]}"
 
+def send_to_telegram(image_path, caption, channel):
+    """
+    Отправка фото по URL через catbox.moe.
+      - заливаем PNG -> получаем URL
+      - sendPhoto с photo=URL и caption
+    """
+    url_img = upload_image(image_path)
+    if not url_img:
+        return 0, "upload failed"
+
+    url_photo = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     try:
-        message_id = r1.json()["result"]["message_id"]
-    except Exception:
-        return 500, f"no message_id: {r1.text[:200]}"
-
-    # Шаг 2 — подпись
-    if not caption:
-        return 200, "no caption"
-
-    url_cap = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption"
-    try:
-        r2 = requests.post(url_cap, data={
+        data = {
             "chat_id": str(channel),
-            "message_id": message_id,
+            "photo": url_img,
             "caption": caption,
-        }, timeout=60)
+        }
+        r = requests.post(url_photo, data=data, timeout=60)
+        return r.status_code, r.text[:200]
     except Exception as e:
-        return 0, f"step2 error: {str(e)[:200]}"
-
-    return r2.status_code, f"step2: {r2.text[:200]}"
+        return 0, str(e)[:200]
 
 
 # ========== ZCODESYSTEM ==========
@@ -246,7 +249,6 @@ def parse_signal_text(bet_text):
 
 
 def find_table(soup, class_word):
-    """Ищет <table>, у которой в class есть указанное слово (среди прочих)."""
     if not soup:
         return None
     for t in soup.find_all("table"):
@@ -493,10 +495,6 @@ def make_abs_key(data):
 
 
 def check_abs_once(seen, first_run, last_ids):
-    """
-    last_ids — dict с ключом 'abs', где храним последний ID.
-    Читаем через iter_messages(min_id=last_id), поэтому окно не ограничено 30.
-    """
     published = 0
 
     async def read():
@@ -506,12 +504,10 @@ def check_abs_once(seen, first_run, last_ids):
             async with TelegramClient(TG_SESSION_FILE, TG_API_ID, TG_API_HASH) as client:
                 print(f"[ABS] Подключение... last_id={abs_last_id}", flush=True)
                 new_messages = []
-                # min_id — читаем только свежее, чем last_id
                 async for message in client.iter_messages(
                     TG_CHANNEL_ID_ABS, min_id=abs_last_id, limit=200
                 ):
                     new_messages.append(message)
-                # iter_messages отдаёт от новых к старым, развернём по возрастанию ID
                 new_messages.reverse()
 
                 if not new_messages:
@@ -533,7 +529,6 @@ def check_abs_once(seen, first_run, last_ids):
                         continue
                     seen.add(key)
 
-                    # Калибровка — только на первом запуске (seen пустой) или при первом проходе после рестарта
                     if first_run:
                         try:
                             age_min = (datetime.now(timezone.utc) - message.date).total_seconds() / 60
@@ -572,7 +567,6 @@ def check_abs_once(seen, first_run, last_ids):
                     except Exception as e:
                         print(f"    [ABS] Ошибка: {e}", flush=True)
 
-                # Сохраняем максимум ID, чтобы на следующем цикле не читать старое
                 last_ids["abs"] = max_id_seen
                 save_last_ids(last_ids)
                 save_seen(seen)
