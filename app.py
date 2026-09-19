@@ -15,10 +15,10 @@ from flask import Flask
 from telethon import TelegramClient
 
 # ====== НАСТРОЙКИ ======
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # только из Environment, без дефолта
-CHANNEL_OPEN = -1003982891138       # @MBmybetting
-CHANNEL_GREY = -1003720979095       # @MBmybetting2
-API_URL = "https://zcodesystem.com/livebettingbot/get_sport_data.php"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHANNEL_MAIN = -1003982891138       # @MBmybetting — единственный канал
+
+PAGE_URL = "https://zcodesystem.com/livebot/?sport=SOCCER"
 SEEN_FILE = "seen.json"
 CHECK_EVERY = 60
 
@@ -29,8 +29,8 @@ TG_SESSION_FILE = "mb_session.session"
 
 TG_CHANNEL_ID_ABS = -1001978715517      # AsianBetSports
 
-MB_COLOR_ZC = (180, 255, 100)           # салатовый
-MB_COLOR_ABS = (100, 180, 255)          # голубой
+MB_COLOR_ZC = (255, 200, 0)             # жёлтый (zcodesystem)
+MB_COLOR_ABS = (100, 180, 255)          # голубой (AsianBetSports)
 # =======================
 
 if not BOT_TOKEN:
@@ -38,186 +38,180 @@ if not BOT_TOKEN:
 
 app = Flask(__name__)
 
-# Кэш: какой type сработал (0, 1 или 2). Определяется автоматически.
-ZC_WORKING_TYPE = None
+
+# ========== ZCODESYSTEM (HTML-страница) ==========
+
+def fetch_page():
+    headers = {"User-Agent": "Mozilla/5.0 (Linux; Android 10)"}
+    r = requests.get(PAGE_URL, headers=headers, timeout=30)
+    r.raise_for_status()
+    return r.text
 
 
-# ========== ZCODESYSTEM ==========
-
-def _try_type(t):
-    """Пробует один type. Возвращает (data, есть_ли_данные)."""
-    payload = {"sport": "SOCCER", "lang": "en", "type": t}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10)",
-        "X-Requested-With": "XMLHttpRequest"
-    }
-    try:
-        r = requests.post(API_URL, data=payload, headers=headers, timeout=30)
-        data = r.json()
-    except Exception as e:
-        print(f"[ZC] type={t} ошибка запроса: {e}", flush=True)
-        return None, False
-
-    inner = data.get("data", {}) if isinstance(data, dict) else {}
-    poss = inner.get("poss_bets", "") or ""
-    live = inner.get("live_bets", "") or ""
-
-    # Признак реальных данных: poss_bets не пустой ИЛИ live_bets содержит строки данных
-    has_data = (len(poss.strip()) > 0) or ("data-id=" in live)
-    return data, has_data
+def _clean(s):
+    if not s:
+        return ""
+    return re.sub(r"\s+", " ", s).strip()
 
 
-def get_data():
-    """
-    Автоматически находит рабочий type (0/1/2), где есть активные сигналы.
-    Результат кэшируется в ZC_WORKING_TYPE.
-    """
-    global ZC_WORKING_TYPE
-
-    # Если уже нашли рабочий — используем его
-    if ZC_WORKING_TYPE is not None:
-        payload = {"sport": "SOCCER", "lang": "en", "type": ZC_WORKING_TYPE}
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10)",
-            "X-Requested-With": "XMLHttpRequest"
-        }
-        r = requests.post(API_URL, data=payload, headers=headers, timeout=30)
-        return r.json()
-
-    # Первый раз — перебираем type 0, 1, 2
-    print("[ZC] Поиск рабочего type...", flush=True)
-    fallback_data = None
-    for t in (0, 1, 2):
-        data, has_data = _try_type(t)
-        if data is None:
-            continue
-        if fallback_data is None:
-            fallback_data = (t, data)
-        if has_data:
-            ZC_WORKING_TYPE = t
-            print(f"[ZC] ✅ Рабочий type={t} (есть активные сигналы)", flush=True)
-            return data
-        else:
-            print(f"[ZC] type={t} — активных сигналов нет", flush=True)
-
-    # Ни один не дал активных — работаем с тем, что есть (архив)
-    if fallback_data is not None:
-        ZC_WORKING_TYPE = fallback_data[0]
-        print(f"[ZC] ⚠️ Ни один type не дал активных. Работаем с type={ZC_WORKING_TYPE} (архив)", flush=True)
-        return fallback_data[1]
-
-    raise RuntimeError("ZC: не удалось получить данные ни с одним type")
-
-
-def parse_table(html, table_class):
-    if not html:
-        return []
-    soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", class_=table_class)
+def parse_live_signals(soup):
+    results = []
+    h = soup.find(lambda tag: tag.name in ("h2", "h3", "h4")
+                  and "Live Signals" in tag.get_text())
+    if not h:
+        return results
+    table = h.find_next("table")
     if not table:
-        return []
+        return results
     tbody = table.find("tbody")
     if not tbody:
-        return []
-    results = []
+        return results
+
     for row in tbody.find_all("tr"):
         cells = row.find_all("td")
-        if len(cells) < 7:
+        if len(cells) < 6:
             continue
         try:
-            date_parts = cells[0].find_all("p")
-            date = " ".join(p.get_text(strip=True) for p in date_parts)
-            strong = cells[1].find("strong")
-            league = strong.get_text(strip=True) if strong else ""
+            date = _clean(cells[0].get_text(" ", strip=True))
+            game_cell = cells[1]
+            strong = game_cell.find("strong")
+            league = _clean(strong.get_text()) if strong else ""
             if strong:
                 strong.extract()
-            match = cells[1].get_text(separator=" ", strip=True)
-            score_raw = cells[3].get_text(strip=True) if len(cells) > 3 else ""
-            score_short = score_raw.split("(")[0].strip() if "(" in score_raw else score_raw.strip()
-            signal = cells[4].get_text(strip=True)
-            odd = cells[6].get_text(strip=True)
-            result_cell = row.find("td", class_="result")
-            result_text = result_cell.get_text(strip=True) if result_cell else ""
+            match = _clean(game_cell.get_text(" ", strip=True))
+
+            score = _clean(cells[3].get_text(" ", strip=True)) if len(cells) > 3 else ""
+            signal = _clean(cells[4].get_text(" ", strip=True)) if len(cells) > 4 else ""
+            odd = _clean(cells[6].get_text(" ", strip=True)) if len(cells) > 6 else ""
+
+            if not match:
+                continue
+
             results.append({
-                "league": league, "match": match, "date": date,
-                "score": score_short, "signal": signal, "odd": odd,
-                "result": result_text,
+                "league": league,
+                "match": match,
+                "date": date,
+                "score": score.split("(")[0].strip() if "(" in score else score,
+                "signal": signal,
+                "odd": odd,
+                "kind": "live",
             })
         except Exception as e:
-            print(f"  [ZC parse error] {e}", flush=True)
+            print(f"  [parse live error] {e}", flush=True)
+            continue
+    return results
+
+
+def parse_unconfirmed(soup):
+    results = []
+    h = soup.find(lambda tag: tag.name in ("h2", "h3", "h4")
+                  and "Unconfirmed bets" in tag.get_text())
+    if not h:
+        return results
+    table = h.find_next("table")
+    if not table:
+        return results
+    tbody = table.find("tbody")
+    if not tbody:
+        return results
+
+    for row in tbody.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 4:
+            continue
+        try:
+            date = _clean(cells[0].get_text(" ", strip=True))
+            game_cell = cells[1]
+            strong = game_cell.find("strong")
+            league = _clean(strong.get_text()) if strong else ""
+            if strong:
+                strong.extract()
+            match = _clean(game_cell.get_text(" ", strip=True))
+
+            score = _clean(cells[2].get_text(" ", strip=True)) if len(cells) > 2 else ""
+            signal = _clean(cells[3].get_text(" ", strip=True)) if len(cells) > 3 else ""
+
+            if not match:
+                continue
+
+            results.append({
+                "league": league,
+                "match": match,
+                "date": date,
+                "score": score.split("(")[0].strip() if "(" in score else score,
+                "signal": signal,
+                "odd": "",
+                "kind": "unconfirmed",
+            })
+        except Exception as e:
+            print(f"  [parse unconf error] {e}", flush=True)
             continue
     return results
 
 
 def make_zc_key(bet):
-    raw = f"ZC|{bet['league']}|{bet['match']}|{bet['date']}"
+    raw = f"ZC|{bet['league']}|{bet['match']}|{bet['date']}|{bet['kind']}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 def check_zc_once(seen, first_run):
     try:
-        data = get_data()
+        html = fetch_page()
     except Exception as e:
-        print(f"[ZC] Ошибка запроса: {e}", flush=True)
+        print(f"[ZC] Ошибка загрузки страницы: {e}", flush=True)
         return
 
-    inner = data.get("data", {})
-    all_bets = (
-        parse_table(inner.get("poss_bets", ""), "poss_bets") +
-        parse_table(inner.get("live_bets", ""), "livebets") +
-        parse_table(inner.get("last_bets", ""), "lastbets")
-    )
+    soup = BeautifulSoup(html, "html.parser")
+    live = parse_live_signals(soup)
+    unconf = parse_unconfirmed(soup)
 
-    total = len(all_bets)
-    published_open = 0
-    published_grey = 0
-    filtered = {"result": 0, "duplicate": 0, "noscore": 0, "first_run": 0}
+    print(f"[ZC] Live: {len(live)} | Unconfirmed: {len(unconf)}", flush=True)
 
-    print(f"[ZC] === Найдено прогнозов: {total} ===", flush=True)
+    published = 0
+    skipped = 0
 
-    for bet in all_bets:
-        if bet["result"]:
-            r = bet["result"].strip().lower()
-            if r.startswith(("win", "loss", "void", "push", "half win", "half loss")):
-                filtered["result"] += 1
-                continue
-
+    for bet in (live + unconf):
         key = make_zc_key(bet)
         if key in seen:
-            filtered["duplicate"] += 1
+            skipped += 1
             continue
         seen.add(key)
 
-        signal_low = bet["signal"].lower()
-        odd_low = bet["odd"].lower()
-        is_grey = ("unlock" in signal_low) or ("unlock" in odd_low)
-
         if first_run:
-            filtered["first_run"] += 1
+            skipped += 1
             continue
 
         try:
-            if is_grey:
-                if not bet.get("score") or "unlock" in bet["score"].lower():
-                    filtered["noscore"] += 1
-                    continue
-                img = make_card(bet, mode="grey", mb_color=MB_COLOR_ZC)
-                caption = f"{bet['league']}\n{bet['match']}\nСчёт: {bet['score']}\nБУДЕТ ГОЛ"
-                code, resp = send_to_telegram(img, caption, CHANNEL_GREY)
-                print(f"  ✅ [ZC-GREY] {bet['match']} | {bet['score']} | TG: {code}", flush=True)
-                published_grey += 1
-            else:
-                img = make_card(bet, mode="open", mb_color=MB_COLOR_ZC)
-                caption = f"{bet['league']}\n{bet['match']}\n{bet['signal']} @ {bet['odd']}"
-                code, resp = send_to_telegram(img, caption, CHANNEL_OPEN)
-                print(f"  ✅ [ZC-OPEN] {bet['match']} | {bet['signal']} | TG: {code}", flush=True)
-                published_open += 1
+            img = make_card(bet, mb_color=MB_COLOR_ZC)
+            caption = make_zc_caption(bet)
+            code, resp = send_to_telegram(img, caption, CHANNEL_MAIN)
+            print(f"  ✅ [ZC-{bet['kind']}] {bet['match']} | TG: {code}", flush=True)
+            published += 1
             time.sleep(1)
         except Exception as e:
-            print(f"    [ZC] Ошибка публикации: {e}", flush=True)
+            print(f"  [ZC] Ошибка публикации: {e}", flush=True)
 
     save_seen(seen)
-    print(f"[ZC] === Итог: открытых {published_open} | серых {published_grey} | отсеяно result:{filtered['result']} дубликатов:{filtered['duplicate']} ===", flush=True)
+    print(f"[ZC] === Опубликовано: {published} | пропущено: {skipped} ===", flush=True)
+
+
+def make_zc_caption(bet):
+    kind = bet.get("kind")
+    league = bet.get("league", "")
+    match = bet.get("match", "")
+    score = bet.get("score", "")
+    signal = bet.get("signal", "")
+    odd = bet.get("odd", "")
+
+    if kind == "unconfirmed":
+        return f"{league}\n{match}\nСчёт: {score}\nОжидается гол"
+
+    if not signal or signal.lower() == "unlock":
+        return f"{league}\n{match}\nСчёт: {score}\nОжидается гол"
+
+    if odd and odd.lower() != "unlock":
+        return f"{league}\n{match}\nСчёт: {score}\n{signal} @ {odd}"
+    return f"{league}\n{match}\nСчёт: {score}\n{signal}"
 
 
 # ========== ОБЩЕЕ ==========
@@ -263,7 +257,7 @@ def find_font():
     return None
 
 
-def make_card(pred, mode="open", mb_color=(255, 200, 0), output="card.png"):
+def make_card(pred, mb_color=MB_COLOR_ZC, output="card.png"):
     W, H = 900, 900
     BG, WHITE, GREY = (15, 32, 55), (255, 255, 255), (180, 190, 200)
     ACCENT = mb_color
@@ -295,24 +289,22 @@ def make_card(pred, mode="open", mb_color=(255, 200, 0), output="card.png"):
     bbox = draw.textbbox((0, 0), match_t, font=f_match)
     draw.text(((W - (bbox[2] - bbox[0])) // 2, y), match_t, fill=WHITE, font=f_match)
 
-    if mode == "grey":
-        y += 130
-        score_t = pred.get("score", "") or "0:0"
-        bbox = draw.textbbox((0, 0), score_t, font=f_score)
-        draw.text(((W - (bbox[2] - bbox[0])) // 2, y), score_t, fill=WHITE, font=f_score)
+    y += 130
+    score_t = pred.get("score", "") or "0:0"
+    bbox = draw.textbbox((0, 0), score_t, font=f_score)
+    draw.text(((W - (bbox[2] - bbox[0])) // 2, y), score_t, fill=WHITE, font=f_score)
 
-        y += 160
-        msg = "БУДЕТ ГОЛ"
-        bbox = draw.textbbox((0, 0), msg, font=f_odd)
-        draw.text(((W - (bbox[2] - bbox[0])) // 2, y), msg, fill=ACCENT, font=f_odd)
-    else:
-        y += 190
-        signal_t = pred.get("signal", "Total Over 0.5")
-        bbox = draw.textbbox((0, 0), signal_t, font=f_signal)
-        draw.text(((W - (bbox[2] - bbox[0])) // 2, y), signal_t, fill=WHITE, font=f_signal)
+    y += 160
+    signal_t = pred.get("signal", "") or "Ожидается гол"
+    if signal_t.lower() == "unlock":
+        signal_t = "Ожидается гол"
+    bbox = draw.textbbox((0, 0), signal_t, font=f_signal)
+    draw.text(((W - (bbox[2] - bbox[0])) // 2, y), signal_t, fill=ACCENT, font=f_signal)
 
-        y += 130
-        odd_t = f"@{pred.get('odd', '')}"
+    odd = pred.get("odd", "")
+    if odd and odd.lower() != "unlock":
+        y += 120
+        odd_t = f"@{odd}"
         bbox = draw.textbbox((0, 0), odd_t, font=f_odd)
         draw.text(((W - (bbox[2] - bbox[0])) // 2, y), odd_t, fill=ACCENT, font=f_odd)
 
@@ -355,7 +347,7 @@ def parse_abs_message(text):
         return None
 
     for emoji, name in [("🔥", "strong"), ("💰", "confirmed"),
-                         ("⭐", "preliminary"), ("💣", "medium"), ("🚀", "super")]:
+                        ("⭐", "preliminary"), ("💣", "medium"), ("🚀", "super")]:
         if emoji in text:
             result["strength"] = name
             break
@@ -414,16 +406,15 @@ def check_abs_once(seen, first_run, abs_last_id):
 
                 try:
                     if data["status"] == "CONFIRMED":
-                        img = make_card(data, mode="open", mb_color=MB_COLOR_ABS)
+                        img = make_card(data, mb_color=MB_COLOR_ABS)
                         caption = f"{data['league']}\n{data['match']}\n{data['signal']}"
-                        code1, _ = send_to_telegram(img, caption, CHANNEL_OPEN)
-                        code2, _ = send_to_telegram(img, caption, CHANNEL_GREY)
-                        print(f"  ✅ [ABS-CONFIRMED] {data['match']} | TG: {code1}/{code2}", flush=True)
+                        code, _ = send_to_telegram(img, caption, CHANNEL_MAIN)
+                        print(f"  ✅ [ABS-CONFIRMED] {data['match']} | TG: {code}", flush=True)
                         published += 1
                     elif data["status"] == "ANNOUNCE":
-                        img = make_card(data, mode="grey", mb_color=MB_COLOR_ABS)
-                        caption = f"{data['league']}\n{data['match']}\nСчёт: {data['score']}\nБУДЕТ ГОЛ"
-                        code, _ = send_to_telegram(img, caption, CHANNEL_GREY)
+                        img = make_card(data, mb_color=MB_COLOR_ABS)
+                        caption = f"{data['league']}\n{data['match']}\nСчёт: {data['score']}\nОжидается гол"
+                        code, _ = send_to_telegram(img, caption, CHANNEL_MAIN)
                         print(f"  ✅ [ABS-ANNOUNCE] {data['match']} | TG: {code}", flush=True)
                         published += 1
                     elif data["status"] == "WIN":
@@ -455,7 +446,7 @@ def worker():
     abs_last_id = 0
 
     if first_run:
-        print("Первый запуск: калибровка", flush=True)
+        print("Первый запуск: калибровка (ничего не публикуем)", flush=True)
 
     while True:
         try:
