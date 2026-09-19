@@ -39,7 +39,7 @@ TG_CHANNEL_ID_ABS = -1001978715517      # AsianBetSports
 MB_COLOR_ZC = (180, 255, 100)
 MB_COLOR_ABS = (100, 180, 255)
 
-CATBOX_API = "https://catbox.moe/user/api.php"
+TELEGRAPH_API = "https://telegra.ph/upload"
 # =======================
 
 app = Flask(__name__)
@@ -176,24 +176,33 @@ def make_card(pred, mode="open", mb_color=(255, 200, 0), show_odd=True, output="
 
 
 def upload_image(image_path):
+    """
+    Заливаем PNG на telegra.ph (это сервис Telegram — Telegram его всегда принимает).
+    Возвращает прямой URL картинки.
+    """
     try:
         with open(image_path, "rb") as f:
-            files = {"fileToUpload": ("card.png", f, "image/png")}
-            data = {"reqtype": "fileupload"}
-            r = requests.post(CATBOX_API, files=files, data=data, timeout=60)
-        if r.status_code == 200 and r.text.strip().startswith("http"):
-            return r.text.strip()
-        print(f"    [CATBOX] upload fail: {r.status_code} {r.text[:200]}", flush=True)
+            files = {"file": ("card.png", f, "image/png")}
+            r = requests.post(TELEGRAPH_API, files=files, timeout=60)
+        if r.status_code != 200:
+            print(f"    [TELEGRAPH] status={r.status_code} body={r.text[:200]}", flush=True)
+            return None
+        try:
+            data = r.json()
+            if isinstance(data, list) and data and "src" in data[0]:
+                src = data[0]["src"]
+                if src.startswith("/"):
+                    src = "https://telegra.ph" + src
+                return src
+        except Exception as e:
+            print(f"    [TELEGRAPH] json error: {e} | body={r.text[:200]}", flush=True)
         return None
     except Exception as e:
-        print(f"    [CATBOX] error: {e}", flush=True)
+        print(f"    [TELEGRAPH] error: {e}", flush=True)
         return None
 
 
 def send_to_telegram(image_path, caption, channel):
-    """
-    Через catbox URL и GET-запрос.
-    """
     url_img = upload_image(image_path)
     if not url_img:
         return 0, "upload failed"
@@ -201,7 +210,7 @@ def send_to_telegram(image_path, caption, channel):
     try:
         params = {"chat_id": str(channel), "photo": url_img, "caption": caption}
         r = requests.get(url_photo, params=params, timeout=60)
-        return r.status_code, r.text[:200]
+        return r.status_code, f"{url_img} | {r.text[:200]}"
     except Exception as e:
         return 0, str(e)[:200]
 
