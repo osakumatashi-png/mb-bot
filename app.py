@@ -152,19 +152,43 @@ def make_card(pred, mode="open", mb_color=(255, 200, 0), show_odd=True, output="
 
 def send_to_telegram(image_path, caption, channel):
     """
-    Стандартный синтаксис Telegram Bot API:
-      - файл фото -> files
-      - chat_id и caption -> data (обычные form-поля)
+    Двухшаговая отправка:
+      1. sendPhoto без caption (чистый multipart с файлом, без кириллицы).
+      2. editMessageCaption отдельным POST с кириллицей.
     """
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    # Шаг 1 — фото без подписи
+    url_photo = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     try:
         with open(image_path, "rb") as f:
             files = {"photo": ("card.png", f, "image/png")}
-            data = {"chat_id": str(channel), "caption": caption}
-            r = requests.post(url, files=files, data=data, timeout=60)
-        return r.status_code, r.text[:200]
+            data = {"chat_id": str(channel)}
+            r1 = requests.post(url_photo, files=files, data=data, timeout=60)
     except Exception as e:
-        return 0, str(e)[:200]
+        return 0, f"step1 error: {str(e)[:200]}"
+
+    if r1.status_code != 200:
+        return r1.status_code, f"step1: {r1.text[:200]}"
+
+    try:
+        message_id = r1.json()["result"]["message_id"]
+    except Exception:
+        return 500, f"no message_id: {r1.text[:200]}"
+
+    # Шаг 2 — подпись
+    if not caption:
+        return 200, "no caption"
+
+    url_cap = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption"
+    try:
+        r2 = requests.post(url_cap, data={
+            "chat_id": str(channel),
+            "message_id": message_id,
+            "caption": caption,
+        }, timeout=60)
+    except Exception as e:
+        return 0, f"step2 error: {str(e)[:200]}"
+
+    return r2.status_code, f"step2: {r2.text[:200]}"
 
 
 # ========== ZCODESYSTEM ==========
@@ -188,11 +212,6 @@ def clean_text(td):
 
 
 def parse_signal_text(bet_text):
-    """
-    'Total Over 1.5 Goals' -> ('over', 2)
-    'Over 0.5'             -> ('over', 1)
-    'Total Under 2.5 Goals' -> ('under', 2)
-    """
     if not bet_text:
         return None, None
     t = bet_text.strip().lower()
@@ -230,7 +249,6 @@ def parse_rows(html, table_class):
                         match_id = c
                         break
 
-            # Пропускаем hot-тренды (нет td.game)
             if "hot" in classes and not tr.find("td", class_="game"):
                 continue
 
