@@ -27,7 +27,6 @@ SEND_DELAY = 2
 BET_DELAY = 2
 LOOP_DELAY = 1
 
-# ABS: публикуем только свежие посты (моложе N минут)
 ABS_FRESH_MIN = 30
 
 TG_API_ID = int(os.environ.get("API_ID", "0"))
@@ -192,18 +191,16 @@ def upload_image(image_path):
 
 
 def send_to_telegram(image_path, caption, channel):
+    """
+    Через catbox URL и GET-запрос.
+    """
     url_img = upload_image(image_path)
     if not url_img:
         return 0, "upload failed"
-
     url_photo = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     try:
-        data = {
-            "chat_id": str(channel),
-            "photo": url_img,
-            "caption": caption,
-        }
-        r = requests.post(url_photo, data=data, timeout=60)
+        params = {"chat_id": str(channel), "photo": url_img, "caption": caption}
+        r = requests.get(url_photo, params=params, timeout=60)
         return r.status_code, r.text[:200]
     except Exception as e:
         return 0, str(e)[:200]
@@ -489,11 +486,6 @@ def make_abs_key(data):
 
 
 def check_abs_once(seen, last_ids):
-    """
-    Читаем только новые сообщения (id > last_id).
-    Публикуем ЛЮБОЕ свежее сообщение (моложе ABS_FRESH_MIN минут).
-    Никакой калибровки при рестарте.
-    """
     published = 0
 
     async def read():
@@ -521,7 +513,6 @@ def check_abs_once(seen, last_ids):
                     if message.id > max_id_seen:
                         max_id_seen = message.id
 
-                    # Свежесть — пропускаем то, что старше N минут
                     try:
                         age_min = (now_utc - message.date).total_seconds() / 60
                     except Exception:
