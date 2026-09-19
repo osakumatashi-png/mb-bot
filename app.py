@@ -6,7 +6,7 @@ import threading
 import asyncio
 import base64
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 from bs4 import BeautifulSoup
@@ -26,6 +26,9 @@ CHECK_EVERY = 60
 SEND_DELAY = 2
 BET_DELAY = 2
 LOOP_DELAY = 1
+
+# ABS: публикуем только свежие посты (моложе N минут)
+ABS_FRESH_MIN = 30
 
 TG_API_ID = int(os.environ.get("API_ID", "0"))
 TG_API_HASH = os.environ.get("API_HASH", "")
@@ -174,10 +177,6 @@ def make_card(pred, mode="open", mb_color=(255, 200, 0), show_odd=True, output="
 
 
 def upload_image(image_path):
-    """
-    Заливает PNG на catbox.moe.
-    Возвращает URL или None.
-    """
     try:
         with open(image_path, "rb") as f:
             files = {"fileToUpload": ("card.png", f, "image/png")}
@@ -193,11 +192,6 @@ def upload_image(image_path):
 
 
 def send_to_telegram(image_path, caption, channel):
-    """
-    Отправка фото по URL через catbox.moe.
-      - заливаем PNG -> получаем URL
-      - sendPhoto с photo=URL и caption
-    """
     url_img = upload_image(image_path)
     if not url_img:
         return 0, "upload failed"
@@ -494,7 +488,12 @@ def make_abs_key(data):
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
-def check_abs_once(seen, first_run, last_ids):
+def check_abs_once(seen, last_ids):
+    """
+    Читаем только новые сообщения (id > last_id).
+    Публикуем ЛЮБОЕ свежее сообщение (моложе ABS_FRESH_MIN минут).
+    Никакой калибровки при рестарте.
+    """
     published = 0
 
     async def read():
@@ -516,10 +515,21 @@ def check_abs_once(seen, first_run, last_ids):
 
                 print(f"[ABS] Новых сообщений: {len(new_messages)}", flush=True)
                 max_id_seen = abs_last_id
+                now_utc = datetime.now(timezone.utc)
 
                 for message in new_messages:
                     if message.id > max_id_seen:
                         max_id_seen = message.id
+
+                    # Свежесть — пропускаем то, что старше N минут
+                    try:
+                        age_min = (now_utc - message.date).total_seconds() / 60
+                    except Exception:
+                        age_min = 999
+                    if age_min > ABS_FRESH_MIN:
+                        print(f"  [ABS-старое {int(age_min)}м] пропуск", flush=True)
+                        continue
+
                     text = message.text or ""
                     data = parse_abs_message(text)
                     if not data:
@@ -528,17 +538,6 @@ def check_abs_once(seen, first_run, last_ids):
                     if key in seen:
                         continue
                     seen.add(key)
-
-                    if first_run:
-                        try:
-                            age_min = (datetime.now(timezone.utc) - message.date).total_seconds() / 60
-                        except Exception:
-                            age_min = 999
-                        if age_min < 10:
-                            print(f"  [ABS-свежее] {data['status']} | {data['match']}", flush=True)
-                        else:
-                            print(f"  [ABS-калибровка] {data['status']} | {data['match']}", flush=True)
-                            continue
 
                     try:
                         if data["status"] == "CONFIRMED":
@@ -600,7 +599,7 @@ def worker():
             time.sleep(LOOP_DELAY)
 
             if TG_API_ID and TG_API_HASH and TG_SESSION_B64:
-                check_abs_once(seen, first_run, last_ids)
+                check_abs_once(seen, last_ids)
             else:
                 print("[TG] Пропуск — нет ключей", flush=True)
 
