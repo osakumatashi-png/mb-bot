@@ -55,7 +55,6 @@ def _clean(s):
 
 
 def _extract_game(td):
-    """Из td.game вытаскивает league + match."""
     strong = td.find("strong")
     league = _clean(strong.get_text()) if strong else ""
     if strong:
@@ -65,7 +64,6 @@ def _extract_game(td):
 
 
 def _extract_date(td):
-    """Из td.date берёт дату (все <p>, склеенные)."""
     parts = td.find_all("p")
     if parts:
         return _clean(" ".join(p.get_text(strip=True) for p in parts))
@@ -80,7 +78,6 @@ def _extract_score(td):
 
 
 def parse_live_signals(soup):
-    """Парсит блок Live Signals внутри div.TBets.LiveBets."""
     results = []
     container = soup.find("div", class_=lambda x: x and "TBets" in x and "LiveBets" in x)
     if not container:
@@ -96,7 +93,6 @@ def parse_live_signals(soup):
 
     for row in tbody.find_all("tr"):
         classes = row.get("class", [])
-        # Строки Live Signals имеют класс вида ["SOCCER", "g64005123"] или ["HOCKEY", ...]
         if not classes:
             continue
 
@@ -118,7 +114,6 @@ def parse_live_signals(soup):
             odd = _clean(odd_td.get_text(" ", strip=True)) if odd_td else ""
             result = _clean(result_td.get_text(" ", strip=True)) if result_td else ""
 
-            # Если есть результат (Win/Loss) — это уже архив в LiveBets, не публикуем.
             if result:
                 continue
 
@@ -142,7 +137,6 @@ def parse_live_signals(soup):
 
 
 def parse_unconfirmed(soup):
-    """Парсит блок Unconfirmed bets внутри div.PossBets."""
     results = []
     container = soup.find("div", class_="PossBets")
     if not container:
@@ -355,13 +349,12 @@ def make_card(pred, mb_color=MB_COLOR_ZC, output="card.png"):
     return output
 
 
-def def send_to_telegram(image_path, caption, channel):
+def send_to_telegram(image_path, caption, channel):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     with open(image_path, "rb") as f:
         files = {"photo": f}
         data = {"chat_id": channel, "caption": caption}
         r = requests.post(url, files=files, data=data, timeout=60)
-    # Полный ответ Telegram — чтобы видеть причину 404
     print(f"  [TG-ANSWER] code={r.status_code} body={r.text[:500]}", flush=True)
     return r.status_code, r.text[:200]
 
