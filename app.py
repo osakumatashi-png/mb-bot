@@ -20,6 +20,7 @@ CHANNEL_OPEN = -1003982891138       # @MBmybetting
 CHANNEL_GREY = -1003720979095       # @MBmybetting2
 API_URL = "https://zcodesystem.com/livebettingbot/get_sport_data.php"
 SEEN_FILE = "seen.json"
+LAST_IDS_FILE = "last_ids.json"
 CHECK_EVERY = 60
 
 SEND_DELAY = 2
@@ -79,6 +80,26 @@ def save_seen(seen):
         os.replace(tmp, SEEN_FILE)
     except Exception as e:
         print(f"[SEEN] Ошибка записи: {e}", flush=True)
+
+
+def load_last_ids():
+    if os.path.exists(LAST_IDS_FILE):
+        try:
+            with open(LAST_IDS_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_last_ids(d):
+    try:
+        tmp = LAST_IDS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, LAST_IDS_FILE)
+    except Exception as e:
+        print(f"[LAST_IDS] Ошибка записи: {e}", flush=True)
 
 
 def find_font():
@@ -224,11 +245,22 @@ def parse_signal_text(bet_text):
     return side, threshold
 
 
+def find_table(soup, class_word):
+    """Ищет <table>, у которой в class есть указанное слово (среди прочих)."""
+    if not soup:
+        return None
+    for t in soup.find_all("table"):
+        cls = t.get("class", []) or []
+        if class_word in cls:
+            return t
+    return None
+
+
 def parse_rows(html, table_class):
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", class_=table_class)
+    table = find_table(soup, table_class)
     if not table:
         return []
     tbody = table.find("tbody")
@@ -460,23 +492,38 @@ def make_abs_key(data):
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
-def check_abs_once(seen, first_run, abs_last_id):
+def check_abs_once(seen, first_run, last_ids):
+    """
+    last_ids — dict с ключом 'abs', где храним последний ID.
+    Читаем через iter_messages(min_id=last_id), поэтому окно не ограничено 30.
+    """
     published = 0
 
     async def read():
-        nonlocal published, abs_last_id
+        nonlocal published
+        abs_last_id = int(last_ids.get("abs", 0) or 0)
         try:
             async with TelegramClient(TG_SESSION_FILE, TG_API_ID, TG_API_HASH) as client:
-                print("[ABS] Подключение...", flush=True)
-                messages = []
-                async for message in client.iter_messages(TG_CHANNEL_ID_ABS, limit=30):
-                    messages.append(message)
-                messages.reverse()
+                print(f"[ABS] Подключение... last_id={abs_last_id}", flush=True)
+                new_messages = []
+                # min_id — читаем только свежее, чем last_id
+                async for message in client.iter_messages(
+                    TG_CHANNEL_ID_ABS, min_id=abs_last_id, limit=200
+                ):
+                    new_messages.append(message)
+                # iter_messages отдаёт от новых к старым, развернём по возрастанию ID
+                new_messages.reverse()
 
-                for message in messages:
-                    if message.id <= abs_last_id:
-                        continue
-                    abs_last_id = message.id
+                if not new_messages:
+                    print(f"[ABS] Новых сообщений нет (last_id={abs_last_id})", flush=True)
+                    return
+
+                print(f"[ABS] Новых сообщений: {len(new_messages)}", flush=True)
+                max_id_seen = abs_last_id
+
+                for message in new_messages:
+                    if message.id > max_id_seen:
+                        max_id_seen = message.id
                     text = message.text or ""
                     data = parse_abs_message(text)
                     if not data:
@@ -486,6 +533,7 @@ def check_abs_once(seen, first_run, abs_last_id):
                         continue
                     seen.add(key)
 
+                    # Калибровка — только на первом запуске (seen пустой) или при первом проходе после рестарта
                     if first_run:
                         try:
                             age_min = (datetime.now(timezone.utc) - message.date).total_seconds() / 60
@@ -524,6 +572,9 @@ def check_abs_once(seen, first_run, abs_last_id):
                     except Exception as e:
                         print(f"    [ABS] Ошибка: {e}", flush=True)
 
+                # Сохраняем максимум ID, чтобы на следующем цикле не читать старое
+                last_ids["abs"] = max_id_seen
+                save_last_ids(last_ids)
                 save_seen(seen)
         except Exception as e:
             print(f"[ABS] Ошибка Telethon: {e}", flush=True)
@@ -544,7 +595,7 @@ def worker():
 
     seen = load_seen()
     first_run = (len(seen) == 0)
-    abs_last_id = 0
+    last_ids = load_last_ids()
 
     if first_run:
         print("Первый запуск: калибровка", flush=True)
@@ -555,7 +606,7 @@ def worker():
             time.sleep(LOOP_DELAY)
 
             if TG_API_ID and TG_API_HASH and TG_SESSION_B64:
-                check_abs_once(seen, first_run, abs_last_id)
+                check_abs_once(seen, first_run, last_ids)
             else:
                 print("[TG] Пропуск — нет ключей", flush=True)
 
