@@ -177,18 +177,26 @@ def get_data(bet_type=0):
     return r.json()
 
 
+def clean_text(td):
+    """Извлекает текст из td, схлопывает пробелы и переносы."""
+    if not td:
+        return ""
+    txt = td.get_text(" ", strip=True)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
+
+
 def parse_signal_text(bet_text):
     """
-    'Total Over 1.5 Goals' -> ('over', 2)  # нужно >= 2 гола
+    'Total Over 1.5 Goals' -> ('over', 2)
     'Total Over 0.5 Goals' -> ('over', 1)
-    'Total Over 2.5 Goals' -> ('over', 3)
     'Total Under 2.5 Goals' -> ('under', 2)
     Возвращает (side, threshold) или (None, None).
     """
     if not bet_text:
         return None, None
     t = bet_text.strip().lower()
-    m = re.search(r"total\s+(over|under)\s+(\d+(?:\.\d+)?)", t)
+    m = re.search(r"(?:total\s+)?(over|under)\s+(\d+(?:\.\d+)?)", t)
     if not m:
         return None, None
     side = m.group(1)
@@ -200,9 +208,21 @@ def parse_signal_text(bet_text):
 def parse_rows(html, table_class):
     """
     Универсальный парсер строк таблицы.
-    Поддерживает две структуры:
-      1) poss_bets:  <tr class="SOCCER gXXXXX" data-code="Over0">
-      2) live_bets:  <tr data-id="1874313" data-sport="SOCCER" class="odd H4">
+    Структуры двух видов:
+      poss_bets:  <tr class="SOCCER g64006829" data-code="Over0">
+                    <td class="date">...</td><td class="game">...</td>
+                    <td class="score">...</td><td class="bet">Unconfirmed Signal</td>
+                  </tr>
+      live_bets:  <tr data-id="1874676" class="odd H4">
+                    <td class="date" rowspan="2">...</td>
+                    <td class="game borderBnone">...</td>
+                    <td class="score borderBnone">...</td>
+                    <td class="s_date borderBnone">...</td>
+                    <td class="bet borderBnone">Total Over 0.5 Goals</td>
+                    <td class="unit borderBnone">1</td>
+                    <td class="odd borderBnone">1.360</td>
+                    <td class="result Win borderBnone">Win</td>
+                  </tr>
     """
     if not html:
         return []
@@ -221,7 +241,7 @@ def parse_rows(html, table_class):
             data_id = tr.get("data-id", "") or ""
             data_code = tr.get("data-code", "") or ""
 
-            # match_id: сначала data-id, потом gXXXXX из class
+            # match_id: data-id (live_bets) или gXXXXX из class (poss_bets)
             match_id = data_id
             if not match_id:
                 for c in classes:
@@ -229,26 +249,30 @@ def parse_rows(html, table_class):
                         match_id = c
                         break
 
+            # Пропускаем строки hot-трендов (у них нет game)
+            if "hot" in classes and not tr.find("td", class_="game"):
+                continue
+
             date_td = tr.find("td", class_="date")
             game_td = tr.find("td", class_="game")
             score_td = tr.find("td", class_="score")
             bet_td = tr.find("td", class_="bet")
             odd_td = tr.find("td", class_="odd")
 
-            date_txt = date_td.get_text(" ", strip=True) if date_td else ""
+            date_txt = clean_text(date_td)
             league = ""
             match = ""
             if game_td:
                 strong = game_td.find("strong")
                 if strong:
-                    league = strong.get_text(strip=True)
-                match = game_td.get_text(" ", strip=True)
+                    league = strong.get_text(" ", strip=True)
+                match = clean_text(game_td)
                 if league and match.startswith(league):
                     match = match[len(league):].strip()
 
-            score = score_td.get_text(strip=True) if score_td else ""
-            bet = bet_td.get_text(strip=True) if bet_td else ""
-            odd = odd_td.get_text(strip=True) if odd_td else ""
+            score = clean_text(score_td)
+            bet = clean_text(bet_td)
+            odd = clean_text(odd_td)
 
             if not match and not match_id:
                 continue
@@ -276,6 +300,7 @@ def make_zc_key(row):
 
 
 def total_goals(score_str):
+    """'1:0 (0:0, 1:0)' -> 1"""
     try:
         main = score_str.split("(")[0].strip()
         parts = main.split(":")
@@ -338,10 +363,12 @@ def check_zc_once(seen, first_run):
         side, threshold = parse_signal_text(bet_text)
         if side is None:
             filtered["no_bet"] += 1
+            print(f"    [ZC nobet] bet='{bet_text}' | {row.get('match','')}", flush=True)
             continue
 
         is_under = (side == "under")
 
+        # Фильтр «гол уже забит»: если голов >= порога — пропуск
         goals = total_goals(row.get("score", ""))
         if threshold is not None and goals >= threshold:
             filtered["goals"] += 1
