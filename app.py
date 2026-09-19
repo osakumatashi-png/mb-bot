@@ -355,12 +355,14 @@ def make_card(pred, mb_color=MB_COLOR_ZC, output="card.png"):
     return output
 
 
-def send_to_telegram(image_path, caption, channel):
+def def send_to_telegram(image_path, caption, channel):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     with open(image_path, "rb") as f:
         files = {"photo": f}
         data = {"chat_id": channel, "caption": caption}
         r = requests.post(url, files=files, data=data, timeout=60)
+    # Полный ответ Telegram — чтобы видеть причину 404
+    print(f"  [TG-ANSWER] code={r.status_code} body={r.text[:500]}", flush=True)
     return r.status_code, r.text[:200]
 
 
