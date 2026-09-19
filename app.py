@@ -15,7 +15,7 @@ from flask import Flask
 from telethon import TelegramClient
 
 # ====== НАСТРОЙКИ ======
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8392847779:AAGCkdGjL7iq2Zy5ZqPKPUJn8W0Qm0TF8Ks")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # только из Environment, без дефолта
 CHANNEL_OPEN = -1003982891138       # @MBmybetting
 CHANNEL_GREY = -1003720979095       # @MBmybetting2
 API_URL = "https://zcodesystem.com/livebettingbot/get_sport_data.php"
@@ -28,12 +28,13 @@ TG_SESSION_B64 = os.environ.get("SESSION_BASE64", "")
 TG_SESSION_FILE = "mb_session.session"
 
 TG_CHANNEL_ID_ABS = -1001978715517      # AsianBetSports
-TG_CHANNEL_ID_ZLIVE = -1001284357331    # ZLive
 
-MB_COLOR_ZC = (180, 255, 100)           # салатовый для zcodesystem
-MB_COLOR_ABS = (100, 180, 255)          # голубой для AsianBetSports
-MB_COLOR_ZLIVE = (255, 200, 0)          # жёлтый для ZLive
+MB_COLOR_ZC = (180, 255, 100)           # салатовый
+MB_COLOR_ABS = (100, 180, 255)          # голубой
 # =======================
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN не задан. Добавь переменную окружения BOT_TOKEN на Render.")
 
 app = Flask(__name__)
 
@@ -385,114 +386,6 @@ def check_abs_once(seen, first_run, abs_last_id):
     return published
 
 
-# ========== ZLIVE ==========
-
-def parse_zlive_message(text):
-    if not text:
-        return None
-    if "Футбол" not in text:
-        return None
-
-    result = {"status": None, "league": "", "match": "", "signal": "Total Over 0.5", "odd": ""}
-
-    if "✅✅✅" in text or "Ставка зашла" in text:
-        result["status"] = "WIN"
-    elif "❌" in text or "Ставка не зашла" in text:
-        result["status"] = "LOSS"
-    elif "Live ставка" in text:
-        result["status"] = "CONFIRMED"
-
-    if not result["status"]:
-        return None
-
-    league_match = re.search(r"Футбол\.\s*(.+)", text)
-    if league_match:
-        result["league"] = league_match.group(1).strip()
-
-    match_match = re.search(r"🏆\s*(.+)", text)
-    if match_match:
-        result["match"] = match_match.group(1).strip()
-
-    odd_match = re.search(r"Коэффициент:\s*([\d\.]+)", text)
-    if odd_match:
-        result["odd"] = odd_match.group(1).strip()
-
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    for line in lines:
-        if "Тотал больше" in line or "Тотал меньше" in line:
-            result["signal"] = line.replace("Основное время", "").strip()
-            break
-
-    return result
-
-
-def make_zlive_key(data):
-    raw = f"ZLV|{data['match']}|{data['league']}|{data['status']}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
-
-
-def check_zlive_once(seen, first_run, zlv_last_id):
-    published = 0
-
-    async def read():
-        nonlocal published, zlv_last_id
-        async with TelegramClient(TG_SESSION_FILE, TG_API_ID, TG_API_HASH) as client:
-            print("[ZLV] Подключение...", flush=True)
-            messages = []
-            async for message in client.iter_messages(TG_CHANNEL_ID_ZLIVE, limit=30):
-                messages.append(message)
-            messages.reverse()
-
-            for message in messages:
-                if message.id <= zlv_last_id:
-                    continue
-                zlv_last_id = message.id
-                text = message.text or ""
-                data = parse_zlive_message(text)
-                if not data:
-                    continue
-                key = make_zlive_key(data)
-                if key in seen:
-                    continue
-                seen.add(key)
-
-                if first_run:
-                    try:
-                        age_min = (datetime.now(timezone.utc) - message.date).total_seconds() / 60
-                    except Exception:
-                        age_min = 999
-                    if age_min < 10:
-                        print(f"  [ZLV-свежее] {data['status']} | {data['match']}", flush=True)
-                    else:
-                        print(f"  [ZLV-калибровка] {data['status']} | {data['match']}", flush=True)
-                        continue
-
-                try:
-                    if data["status"] == "CONFIRMED":
-                        img = make_card(data, mode="open", mb_color=MB_COLOR_ZLIVE)
-                        caption = f"{data['league']}\n{data['match']}\n{data['signal']} @ {data['odd']}"
-                        code1, _ = send_to_telegram(img, caption, CHANNEL_OPEN)
-                        code2, _ = send_to_telegram(img, caption, CHANNEL_GREY)
-                        print(f"  ✅ [ZLV-CONFIRMED] {data['match']} | TG: {code1}/{code2}", flush=True)
-                        published += 1
-                    elif data["status"] == "WIN":
-                        print(f"  [ZLV-WIN] {data['match']} — пропуск", flush=True)
-                    elif data["status"] == "LOSS":
-                        print(f"  [ZLV-LOSS] {data['match']} — пропуск", flush=True)
-                    time.sleep(1)
-                except Exception as e:
-                    print(f"    [ZLV] Ошибка: {e}", flush=True)
-
-            save_seen(seen)
-
-    try:
-        asyncio.run(read())
-    except Exception as e:
-        print(f"[ZLV] Ошибка цикла: {e}", flush=True)
-
-    return published
-
-
 # ========== ГЛАВНЫЙ ЦИКЛ ==========
 
 def worker():
@@ -502,7 +395,6 @@ def worker():
     seen = load_seen()
     first_run = (len(seen) == 0)
     abs_last_id = 0
-    zlv_last_id = 0
 
     if first_run:
         print("Первый запуск: калибровка", flush=True)
@@ -513,7 +405,6 @@ def worker():
 
             if TG_API_ID and TG_API_HASH and TG_SESSION_B64:
                 check_abs_once(seen, first_run, abs_last_id)
-                check_zlive_once(seen, first_run, zlv_last_id)
             else:
                 print("[TG] Пропуск — нет ключей", flush=True)
 
