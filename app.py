@@ -151,11 +151,6 @@ def make_card(pred, mode="open", mb_color=(255, 200, 0), show_odd=True, output="
 
 
 def send_to_telegram(image_path, caption, channel):
-    """
-    Отправка фото в Telegram через sendPhoto.
-    Все поля передаём через multipart (files), а не через data.
-    Это правильный формат для sendPhoto с файлом.
-    """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     try:
         with open(image_path, "rb") as f:
@@ -182,7 +177,33 @@ def get_data(bet_type=0):
     return r.json()
 
 
+def parse_signal_text(bet_text):
+    """
+    'Total Over 1.5 Goals' -> ('over', 2)  # нужно >= 2 гола
+    'Total Over 0.5 Goals' -> ('over', 1)
+    'Total Over 2.5 Goals' -> ('over', 3)
+    'Total Under 2.5 Goals' -> ('under', 2)
+    Возвращает (side, threshold) или (None, None).
+    """
+    if not bet_text:
+        return None, None
+    t = bet_text.strip().lower()
+    m = re.search(r"total\s+(over|under)\s+(\d+(?:\.\d+)?)", t)
+    if not m:
+        return None, None
+    side = m.group(1)
+    line = float(m.group(2))
+    threshold = int(line + 0.5)
+    return side, threshold
+
+
 def parse_rows(html, table_class):
+    """
+    Универсальный парсер строк таблицы.
+    Поддерживает две структуры:
+      1) poss_bets:  <tr class="SOCCER gXXXXX" data-code="Over0">
+      2) live_bets:  <tr data-id="1874313" data-sport="SOCCER" class="odd H4">
+    """
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -197,13 +218,16 @@ def parse_rows(html, table_class):
     for tr in tbody.find_all("tr"):
         try:
             classes = tr.get("class", []) or []
-            match_id = ""
-            for c in classes:
-                if c.startswith("g") and c[1:].isdigit():
-                    match_id = c
-                    break
+            data_id = tr.get("data-id", "") or ""
             data_code = tr.get("data-code", "") or ""
-            data_time = tr.get("data-time", "") or ""
+
+            # match_id: сначала data-id, потом gXXXXX из class
+            match_id = data_id
+            if not match_id:
+                for c in classes:
+                    if c.startswith("g") and c[1:].isdigit():
+                        match_id = c
+                        break
 
             date_td = tr.find("td", class_="date")
             game_td = tr.find("td", class_="game")
@@ -226,13 +250,12 @@ def parse_rows(html, table_class):
             bet = bet_td.get_text(strip=True) if bet_td else ""
             odd = odd_td.get_text(strip=True) if odd_td else ""
 
-            if not match_id and not match:
+            if not match and not match_id:
                 continue
 
             rows.append({
                 "match_id": match_id,
                 "data_code": data_code,
-                "data_time": data_time,
                 "date": date_txt,
                 "league": league,
                 "match": match,
@@ -248,7 +271,7 @@ def parse_rows(html, table_class):
 
 def make_zc_key(row):
     base = row.get("match_id") or row.get("match") or ""
-    raw = f"ZC|{base}|{row.get('data_code','')}"
+    raw = f"ZC|{base}|{row.get('bet','')}|{row.get('data_code','')}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
@@ -261,18 +284,6 @@ def total_goals(score_str):
         return int(parts[0].strip()) + int(parts[1].strip())
     except Exception:
         return 0
-
-
-def parse_code_threshold(code):
-    if not code:
-        return None, None
-    m = re.match(r"^(Over|Under)(\d+)$", code.strip())
-    if not m:
-        return None, None
-    side = m.group(1).lower()
-    idx = int(m.group(2))
-    threshold = idx + 1
-    return side, threshold
 
 
 def check_zc_once(seen, first_run):
@@ -307,19 +318,26 @@ def check_zc_once(seen, first_run):
 
     published_open = 0
     published_grey = 0
-    filtered = {"table": 0, "dup": 0, "goals": 0, "first_run": 0, "no_code": 0}
+    filtered = {"poss": 0, "dup": 0, "goals": 0, "first_run": 0, "no_bet": 0, "unlock": 0}
 
     print(f"[ZC] === Всего строк: {len(all_rows)} ===", flush=True)
 
     for row in all_rows:
         if row["_table"] == "poss":
-            filtered["table"] += 1
+            filtered["poss"] += 1
             continue
 
-        code = row.get("data_code", "")
-        side, threshold = parse_code_threshold(code)
+        bet_text = row.get("bet", "") or ""
+        bet_low = bet_text.strip().lower()
+
+        # Unlock / Unconfirmed — пропуск
+        if "unlock" in bet_low or "unconfirmed" in bet_low:
+            filtered["unlock"] += 1
+            continue
+
+        side, threshold = parse_signal_text(bet_text)
         if side is None:
-            filtered["no_code"] += 1
+            filtered["no_bet"] += 1
             continue
 
         is_under = (side == "under")
@@ -350,13 +368,13 @@ def check_zc_once(seen, first_run):
                 img1 = make_card(row, mode="open", mb_color=MB_COLOR_ZC, show_odd=False)
                 caption1 = f"{row['league']}\n{row['match']}\nОЖИДАЕТСЯ ГОЛ"
                 code1, _ = send_to_telegram(img1, caption1, CHANNEL_OPEN)
-                print(f"  [ZC-OPEN] {row['match']} | {code} | MB1: {code1}", flush=True)
+                print(f"  [ZC-OPEN] {row['match']} | {bet_text} | MB1: {code1}", flush=True)
                 time.sleep(SEND_DELAY)
 
                 img2 = make_card(row, mode="open", mb_color=MB_COLOR_ZC, show_odd=True)
                 caption2 = f"{row['league']}\n{row['match']}\nОЖИДАЕТСЯ ГОЛ @ {row.get('odd','')}"
                 code2, _ = send_to_telegram(img2, caption2, CHANNEL_GREY)
-                print(f"  ✅ [ZC-OPEN] {row['match']} | {code} | MB2: {code2}", flush=True)
+                print(f"  ✅ [ZC-OPEN] {row['match']} | {bet_text} | MB2: {code2}", flush=True)
                 published_open += 1
 
             time.sleep(BET_DELAY)
@@ -366,8 +384,8 @@ def check_zc_once(seen, first_run):
     save_seen(seen)
     print(
         f"[ZC] === Итог: open {published_open} | grey {published_grey} | "
-        f"poss:{filtered['table']} nogoals:{filtered['goals']} dup:{filtered['dup']} "
-        f"nocode:{filtered['no_code']} first:{filtered['first_run']} ===",
+        f"poss:{filtered['poss']} nogoals:{filtered['goals']} dup:{filtered['dup']} "
+        f"unlock:{filtered['unlock']} nobet:{filtered['no_bet']} first:{filtered['first_run']} ===",
         flush=True
     )
 
